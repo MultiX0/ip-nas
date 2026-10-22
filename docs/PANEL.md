@@ -71,6 +71,14 @@ On Windows, if PlatformIO fails while unpacking the framework (a path that is to
 
 ### With esptool
 
+You don't have to build it. The [Releases](https://github.com/MultiX0/ip-nas/releases) page has
+`ipnas-panel-1.1.0.bin`, all four parts merged into one file that goes at 0x0:
+
+```bash
+pip install esptool
+esptool.py --chip esp32s3 --port COM5 --baud 921600 write_flash -z 0x0 ipnas-panel-1.1.0.bin
+```
+
 After a build, `panel/firmware/.pio/build/ipnas_panel/` has `bootloader.bin`, `partitions.bin` and `firmware.bin`, and
 `boot_app0.bin` is in the PlatformIO folder under `packages/framework-arduinoespressif32/tools/partitions/`. With those
 four files you can flash from any computer that has Python, the Pi included:
