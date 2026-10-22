@@ -31,7 +31,8 @@ class AssembledContext {
 /// Also decides when to auto-compact.
 abstract class ContextAssembler {
   Future<AssembledContext> build({required String chatId, required LlmModel model});
-  /// Called after each finished assistant turn (memory extraction, auto-compaction check). Must not block the UI.
+  /// Called after each finished assistant turn (memory extraction, auto-compaction check). Must not block the UI;
+  /// completes when the background work it started is done.
   Future<void> afterTurn({required String chatId, required LlmModel model});
   Future<void> compact({required String chatId, required LlmModel model});
   Future<void> clearContext({required String chatId});
@@ -44,7 +45,14 @@ class ToolResult {
   final String content; // text given back to the model
   final bool isError;
   final Map<String, dynamic>? display; // optional rich data for the tool card UI
-  const ToolResult(this.content, {this.isError = false, this.display});
+
+  /// The tool could not run at all (NAS unreachable or without access, timed out, switched off): calling it again
+  /// in the same reply will not help.
+  final bool unavailable;
+  const ToolResult(this.content, {this.isError = false, this.display, this.unavailable = false});
+
+  /// What a tool returns when the user did not approve it.
+  static const declined = ToolResult('The user declined to run this tool. Do not retry it; ask how to proceed.', isError: true);
 }
 
 /// Asks the user before a risky tool runs. Implemented by the UI layer.

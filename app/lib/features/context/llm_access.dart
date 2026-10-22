@@ -5,6 +5,7 @@ import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../core/contracts/llm.dart';
+import '../providers/foreground_gate.dart';
 import '../providers/llm_registry.dart';
 
 class IntelLlm {
@@ -38,8 +39,9 @@ class IntelLlm {
     }
   }
 
-  /// Runs one non-interactive completion and returns the whole text.
-  /// Throws [StateError] with a user-readable message on failure.
+  /// Runs one non-interactive completion and returns the whole text. A [background] call waits while a reply or a
+  /// voice call holds the model and throws [BackgroundCancelled] when one starts (see foreground_gate.dart).
+  /// Throws [StateError] with a user-readable message on other failures.
   Future<String> complete(
     LlmModel model,
     List<LlmMessage> messages, {
@@ -47,7 +49,17 @@ class IntelLlm {
     int? maxTokens,
     Duration timeout = const Duration(minutes: 4),
     LlmCancelToken? cancel,
-  }) async {
+    bool background = true,
+  }) {
+    if (!background) return _complete(model, messages, temperature, maxTokens, timeout, cancel);
+    return _ref.read(foregroundGateProvider).background((stop) {
+      cancel?.onCancel(stop.cancel);
+      return _complete(model, messages, temperature, maxTokens, timeout, stop);
+    });
+  }
+
+  Future<String> _complete(LlmModel model, List<LlmMessage> messages, double temperature, int? maxTokens, Duration timeout,
+      LlmCancelToken? stop) async {
     final client = clientFor(model.providerId);
     if (client == null) throw StateError('The model provider "${model.providerId}" is not available.');
     // Background calls need no thinking; a model that cannot turn it off thinks as little as it can.
@@ -61,7 +73,8 @@ class IntelLlm {
       stream: true,
     );
     final buf = StringBuffer();
-    final token = cancel ?? LlmCancelToken();
+    final token = LlmCancelToken();
+    stop?.onCancel(token.cancel);
     try {
       await for (final e in client.chat(req, cancel: token).timeout(timeout)) {
         if (e is TextDelta) buf.write(e.text);
@@ -71,6 +84,7 @@ class IntelLlm {
       token.cancel();
       throw StateError('The model took too long to answer.');
     }
+    if (token.isCancelled) throw StateError('Cancelled.');
     return stripThinking(buf.toString()).trim();
   }
 }

@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'dart:math' as math;
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../../core/contracts/llm.dart';
 import '../capabilities.dart';
@@ -21,6 +22,9 @@ class AnthropicClient extends LlmClient {
   final String baseUrl;
   final CapsLookup _capsOf;
   final Dio _dio;
+
+  @visibleForTesting
+  Dio get dio => _dio;
   String get host => hostOf(baseUrl);
 
   /// Thinking blocks (with signatures) that preceded a tool_use, keyed by the first tool_use id.
@@ -121,7 +125,12 @@ class AnthropicClient extends LlmClient {
         ];
       case LlmRole.tool:
         return [
-          {'type': 'tool_result', 'tool_use_id': m.toolCallId ?? '', 'content': m.content.isEmpty ? '(empty)' : m.content},
+          {
+            'type': 'tool_result',
+            'tool_use_id': m.toolCallId ?? '',
+            'content': m.content.isEmpty ? '(empty)' : m.content,
+            if (m.isError) 'is_error': true,
+          },
         ];
       case LlmRole.system:
         return const [];
@@ -174,7 +183,8 @@ class AnthropicClient extends LlmClient {
       if (thinking && adaptive) 'thinking': {'type': 'adaptive', if (_newApi(id)) 'display': 'summarized'},
       if (thinking && !adaptive) 'thinking': {'type': 'enabled', 'budget_tokens': budget},
       if (adaptive && effort != null) 'output_config': {'effort': effort},
-      if (req.tools.isNotEmpty) 'tools': [for (final t in req.tools) {'name': t.name, 'description': t.description, 'input_schema': t.parameters}],
+      if (req.tools.isNotEmpty && req.toolChoice != 'none')
+        'tools': [for (final t in req.tools) {'name': t.name, 'description': t.description, 'input_schema': t.parameters}],
     };
   }
 
@@ -200,6 +210,7 @@ class AnthropicClient extends LlmClient {
     final thinkingBlocks = <Map<String, dynamic>>[];
     var input = 0, output = 0;
     var stop = 'stop';
+    var ended = false;
     Duration? first;
     try {
       await for (final ev in parseSse(r.data!.stream)) {
@@ -243,9 +254,12 @@ class AnthropicClient extends LlmClient {
             } else if (b['type'] == 'thinking' || b['type'] == 'redacted_thinking') {
               thinkingBlocks.add({...b});
             }
+          case 'message_stop':
+            ended = true;
           case 'message_delta':
             final d = j['delta'];
             if (d is Map && d['stop_reason'] != null) {
+              ended = true;
               stop = switch (d['stop_reason']) { 'end_turn' => 'stop', 'tool_use' => 'tool_calls', 'max_tokens' => 'length', final s => s.toString() };
             }
             final u = j['usage'];
@@ -262,6 +276,11 @@ class AnthropicClient extends LlmClient {
     }
     if (cancel?.isCancelled ?? false) {
       yield const DoneEvent('cancelled');
+      return;
+    }
+    // No stop reason: the connection dropped in the middle. The text so far stays, tool calls are dropped.
+    if (!ended) {
+      yield cutOffError(host);
       return;
     }
     if (calls.isNotEmpty && thinkingBlocks.isNotEmpty) {

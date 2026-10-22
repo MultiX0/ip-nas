@@ -1,8 +1,8 @@
 // Request-only changes to the assembled messages (nothing here is saved). Deterministic, so the prewarm request and
 // the real turn share the exact same prefix. Pure Dart, no Flutter imports.
 import '../../../core/contracts/llm.dart';
-import '../../context/prompts.dart' show smallModelAnswerNote;
-import '../../context/turn_planner.dart' show detectLang;
+import '../../context/prompts.dart' show smallModelAnswerNote, smallModelErrorNote;
+import '../../context/turn_planner.dart' show asksForLanguage, detectLang;
 
 /// [turnHint]: request-only answer frame / skill card for the LATEST user message (small models follow the most
 /// recent text best). [toolsCapable] false: tool exchanges in the history (e.g. NAS data the app fetched itself) are
@@ -17,7 +17,7 @@ List<LlmMessage> shapeMessages(List<LlmMessage> input,
   // Language of each user message, from the user's own text (before hints and reminders are added).
   final langs = [
     for (final m in input)
-      if (m.role == LlmRole.user) m.content.trim().isEmpty ? null : languageDirective(m.content)
+      if (m.role == LlmRole.user) m.content.trim().isEmpty ? null : _directive(m.content)
   ];
   var messages = input;
   if (!toolsCapable && messages.any((m) => m.role == LlmRole.tool || m.toolCalls.isNotEmpty)) {
@@ -54,7 +54,8 @@ List<LlmMessage> shapeMessages(List<LlmMessage> input,
     messages = [
       for (final m in messages)
         m.role == LlmRole.tool
-            ? LlmMessage(LlmRole.tool, '${m.content}$smallModelAnswerNote', toolCallId: m.toolCallId, toolName: m.toolName)
+            ? LlmMessage(LlmRole.tool, '${m.content}${m.isError ? smallModelErrorNote : smallModelAnswerNote}',
+                toolCallId: m.toolCallId, toolName: m.toolName, isError: m.isError)
             : m,
     ];
   }
@@ -93,11 +94,17 @@ List<LlmMessage> shapeMessages(List<LlmMessage> input,
 
 /// The language lock for one user message, decided from the user's own words only: the hidden time note, retrieved
 /// memories, turn hints and voice reminders are English and used to tip short Arabic messages into
-/// "(Reply in English only.)".
+/// "(Reply in English only.)". '' when the user asks for a language or a translation: then the language is theirs.
 String languageDirective(String text) {
   final t = text
       .replaceAll(RegExp(r'<context>[\s\S]*?</context>'), '')
       .replaceAll(RegExp(r'<background>[\s\S]*?</background>'), '')
       .replaceAll(RegExp(r'\n\n\(voice call:[^)]*\)'), '');
+  if (asksForLanguage(t)) return '';
   return detectLang(t) == 'ar' ? '(رد باللغة العربية فقط.)' : '(Reply in English only.)';
+}
+
+String? _directive(String text) {
+  final d = languageDirective(text);
+  return d.isEmpty ? null : d;
 }

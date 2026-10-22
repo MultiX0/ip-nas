@@ -95,7 +95,7 @@ class MemoryExtractor {
 
 /// Cheap check that a message says something about the user (English + Arabic first-person cues).
 bool mentionsSelf(String text) =>
-    RegExp(r"(?<![a-z])(i|i'm|im|i've|my|mine|me|remember|forget|call me)(?![a-z])", caseSensitive: false).hasMatch(text) ||
+    RegExp(r"(?<![a-z])(i|i'm|im|i've|my|mine|myself|remember|forget|call me)(?![a-z])", caseSensitive: false).hasMatch(text) ||
     RegExp(r'(أنا|انا|اسمي|عندي|لدي|أحب|احب|أفضل|افضل|أعمل|اعمل|أسكن|اسكن|تذكر|تذكّر|انس|بيتي|جهازي|عملي|زوجتي|زوجي|ابني|بنتي|عائلتي)').hasMatch(text);
 
 /// Tolerant parser: accepts code fences, a bare list, or {"operations": [...]} / {"memories": [...]}.

@@ -144,7 +144,6 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
 
   Future<void> _finish() async {
     _defaultModel = await ref.read(activeNasProvider.notifier).chooseDefaultModel();
-    await ref.read(dbProvider).setSetting('onboarding_done', 'true');
     if (mounted) setState(() => _step = _Step.done);
   }
 
@@ -182,10 +181,7 @@ class _OnboardingScreenState extends ConsumerState<OnboardingScreen> {
     }
   }
 
-  Future<void> _skip() async {
-    await ref.read(dbProvider).setSetting('onboarding_done', 'true');
-    if (mounted) context.go('/settings/providers');
-  }
+  void _skip() => context.go('/settings/providers');
 
   @override
   Widget build(BuildContext context) {

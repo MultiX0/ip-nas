@@ -23,6 +23,14 @@ class AudioEngine {
   }
 }
 
+/// The audio side of a call: microphone, playback and audio start-up. Tests swap it for fakes.
+class CallAudio {
+  const CallAudio();
+  MicStream mic() => MicStream();
+  PcmStreamPlayer player({VoidCallback? onStarted}) => PcmStreamPlayer(onStarted: onStarted);
+  Future<void> ready() => AudioEngine.ensure();
+}
+
 /// RMS of little-endian PCM16 bytes, 0..1.
 double pcm16Rms(Uint8List bytes, [int start = 0, int? end]) {
   final bd = ByteData.sublistView(bytes);
@@ -55,7 +63,7 @@ class PcmStreamPlayer {
   AudioSource? _src;
   SoundHandle? _handle;
   int _carry = -1; // odd leftover byte
-  final List<double> _levels = []; // one per 20 ms of queued audio
+  final List<double> _rms = []; // one per 20 ms of queued audio
   int _bytesQueued = 0;
   bool _ended = false;
   bool _stopped = false;
@@ -64,6 +72,9 @@ class PcmStreamPlayer {
   Stopwatch? _clock;
 
   Future<void> get finished => _finished.future;
+
+  /// True from the first queued chunk until the audio has drained or was stopped.
+  bool get playing => _handle != null && !_stopped && !_finished.isCompleted;
 
   Future<void> start() async {
     await AudioEngine.ensure();
@@ -92,10 +103,10 @@ class PcmStreamPlayer {
       data = Uint8List.sublistView(data, 0, data.length - 1);
     }
     if (data.isEmpty) return;
-    // Level timeline for the orb (20 ms windows).
+    // Loudness timeline in 20 ms windows, for the orb and for the VAD's echo estimate.
     final win = sampleRate ~/ 50 * 2;
     for (var i = 0; i < data.length; i += win) {
-      _levels.add(levelFromRms(pcm16Rms(data, i, math.min(i + win, data.length))));
+      _rms.add(pcm16Rms(data, i, math.min(i + win, data.length)));
     }
     _bytesQueued += data.length;
     try {
@@ -148,14 +159,16 @@ class PcmStreamPlayer {
     }
   }
 
-  /// Output level (0..1) at the current playback position.
-  double get level {
+  /// Output level (0..1) at the current playback position, for the orb.
+  double get level => levelFromRms(rms);
+
+  /// RMS of the audio playing right now.
+  double get rms {
     final src = _src;
-    if (src == null || _handle == null || _levels.isEmpty || _finished.isCompleted) return 0;
+    if (src == null || _handle == null || _rms.isEmpty || _finished.isCompleted) return 0;
     try {
-      final ms = SoLoud.instance.getStreamTimeConsumed(src).inMilliseconds;
-      final i = ms ~/ 20;
-      return i < _levels.length ? _levels[i] : 0;
+      final i = SoLoud.instance.getStreamTimeConsumed(src).inMilliseconds ~/ 20;
+      return i < _rms.length ? _rms[i] : 0;
     } catch (_) {
       return 0;
     }
@@ -222,6 +235,9 @@ Future<Uint8List> encodeWav(Uint8List pcm, int sampleRate) => Isolate.run(() => 
 enum VadEvent { speechStart, speechEnd }
 
 /// Energy VAD with an adaptive noise floor. Feed 16 kHz PCM16 chunks; collects the utterance with pre-roll.
+///
+/// While Nur's voice plays, the mic hears it too. The VAD learns how loud that echo is compared to the output
+/// ([playbackRms]) and only counts speech that is clearly louder than the echo it expects at that moment.
 class EnergyVad {
   EnergyVad({this.sampleRate = 16000, this.silenceMs = 550, this.minSpeechMs = 250, this.preRollMs = 300, this.maxUtteranceMs = 30000});
   final int sampleRate;
@@ -231,12 +247,19 @@ class EnergyVad {
   final int maxUtteranceMs;
 
   double noiseFloor = 0.006;
-  double _echoFloor = 0; // mic energy caused by our own playback
   bool inSpeech = false;
   double lastRms = 0;
 
-  /// While true (assistant speaking), the start threshold is raised so speaker echo does not barge in.
+  /// True while Nur's voice plays (an answer or a filler): speech has to stand out from its echo.
   bool playbackActive = false;
+
+  /// RMS of the audio playing right now; set with every chunk while [playbackActive].
+  double playbackRms = 0;
+
+  double _coupling = 0; // how loud the echo is: mic RMS per unit of output RMS
+  double _lastAnswer = -1; // the echo learned over the previous answer (-1 before the first one)
+  final _outs = <double>[]; // output RMS of the last 200 ms, so the delay and reverb from speaker to mic are covered
+  int _playMs = 0;
 
   final _preRoll = <Uint8List>[];
   int _preRollBytes = 0;
@@ -260,19 +283,33 @@ class EnergyVad {
     lastRms = rms;
     final events = <VadEvent>[];
 
-    if (playbackActive && !inSpeech) {
-      _echoFloor = _echoFloor == 0 ? rms : _echoFloor * 0.92 + rms * 0.08;
-    } else if (!playbackActive) {
-      _echoFloor *= 0.9;
+    var echoGate = 0.0;
+    if (playbackActive) {
+      _outs.add(playbackRms);
+      if (_outs.length > 10) _outs.removeAt(0);
+      final peak = _outs.reduce(math.max);
+      echoGate = _coupling * peak * 2.0;
+      if (!inSpeech && peak > 0.01) {
+        // An upper envelope of the echo, learned mostly in the first second of each answer. A level far above what
+        // the earlier answers taught is most likely the user talking over Nur, so it only moves the estimate slowly.
+        final r = rms / peak;
+        final plausible = _lastAnswer < 0 || r < math.max(_lastAnswer * 3, 0.05);
+        final rate = _playMs < 1000 ? (r > _coupling ? (plausible ? 0.3 : 0.01) : 0.05) : (r > _coupling ? 0.01 : 0.002);
+        _coupling += (r - _coupling) * rate;
+      }
+      _playMs += ms.round();
+    } else {
+      if (_playMs > 0) _lastAnswer = _coupling;
+      _outs.clear();
+      _playMs = 0;
     }
     final startThreshold = math.max(noiseFloor * 3.0, 0.012) * (playbackActive ? 1.6 : 1.0);
-    final echoGate = playbackActive ? _echoFloor * 2.4 : 0.0;
     final threshold = math.max(startThreshold, echoGate);
     final keepThreshold = math.max(noiseFloor * 2.0, 0.008);
 
     if (!inSpeech) {
-      // Adapt the noise floor only on quiet-ish frames.
-      if (rms < threshold) {
+      // Adapt the noise floor only on quiet-ish frames, and not to Nur's echo (the echo gate handles that).
+      if (rms < threshold && !playbackActive) {
         noiseFloor = (noiseFloor * 0.95 + rms * 0.05).clamp(0.001, 0.05);
       }
       _preRoll.add(chunk);

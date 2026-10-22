@@ -280,7 +280,7 @@ class LlmRegistry {
     for (final r in rows) {
       var key = await _secure.read(key: 'provider_key_${r.id}').catchError((Object _) => null);
       if ((key == null || key.isEmpty) && r.kind == 'nas_hub') {
-        final nasId = _extra(r)['nasId'];
+        final nasId = _extra(r)['nas_device_id'] ?? _extra(r)['nasId'];
         if (nasId is String) key = await _secure.read(key: 'nas_token_$nasId').catchError((Object _) => null);
       }
       _keys[r.id] = key ?? '';

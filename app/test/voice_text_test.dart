@@ -16,6 +16,19 @@ void main() {
       expect(markdownToSpeech('Open https://example.com/page now'), 'Open now');
     });
 
+    test('drops emoji, which a small model adds even when told not to', () {
+      expect(markdownToSpeech('Two plus two equals four! That is simple. 🍎🍌🍇'), 'Two plus two equals four! That is simple.');
+      expect(markdownToSpeech('Done 👍🏽, all good 🇯🇴. Press 1️⃣.'), 'Done, all good. Press 1.');
+      expect(markdownToSpeech('جهازك بخير 😊'), 'جهازك بخير');
+    });
+
+    test('a paragraph break adds no second mark after a question or a tag', () {
+      expect(markdownToSpeech('Want me to look it up?\n\nI found a cool fact!'), 'Want me to look it up? I found a cool fact!');
+      expect(markdownToSpeech('Here is what I found:\n\nThe moon is far.'), 'Here is what I found: The moon is far.');
+      expect(markdownToSpeech('[cheerfully]\n\nThe moon is far.', keepDirections: false), 'The moon is far.');
+      expect(markdownToSpeech('هل تريد المزيد؟\n\nالقمر بعيد.'), 'هل تريد المزيد؟ القمر بعيد.');
+    });
+
     test('skips code blocks', () {
       expect(markdownToSpeech('Here:\n```dart\nprint(1);\n```\nDone.'), 'Here: Done.');
     });
@@ -47,6 +60,13 @@ void main() {
 
     test('never speaks code inside fences', () {
       expect(_split(['Run this:\n```bash\nls -la\n```\nDone. ']), ['Run this:', 'Done.']);
+    });
+
+    test('a direction on its own line goes with the next sentence', () {
+      // Sent alone, Drama 3 turns "[cheerfully]" into a laugh before the answer.
+      expect(_split(['[cheerfully]\n', 'Done! Jellyfin is running again.']), ['[cheerfully] Done!', 'Jellyfin is running again.']);
+      expect(_split(['[calmly]\n[short pause]\nAll good. ']), ['[calmly] [short pause] All good.']);
+      expect(_split(['That was fun. [small laugh]']), ['That was fun.', '[small laugh]']);
     });
 
     test('sends the first clause early at a comma', () {

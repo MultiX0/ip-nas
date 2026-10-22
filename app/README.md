@@ -73,7 +73,9 @@ The voice call, the NAS page and the pairing are the ones in the video.
 - **Chat** (`/`): streaming replies with Markdown, code and images, a model picker, thinking levels, voice messages,
   read-aloud, and a ring that shows how full the context window is. Tools run from the chat (NAS status, Docker,
   web search through SearXNG, commands, memory, MCP servers and skills) and the risky ones ask first.
-- **Voice call** (`/call`): the sky orb, live captions, mute and the voice picker. Talk over Nur to interrupt it.
+- **Voice call** (`/call`): the sky orb, live captions, mute and the voice picker. Talk over Nur to interrupt it, or
+  tap the orb. On a PC with loud speakers and no echo cancellation the app can't always tell your voice from its own,
+  so use headphones or tap. On a phone the mic goes off while the app is in the background and comes back with it.
 - **NAS** (`/nas`): Overview (CPU, memory, temperature, uptime, network, disks), Apps (the Docker containers, with
   start, stop, restart, logs and remove), Models (installed ones, the hub's list for a 4 GB Pi, Hugging Face search,
   downloads) and Runtimes (install, start or stop llama.cpp and Ollama).

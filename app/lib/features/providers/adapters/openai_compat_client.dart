@@ -4,6 +4,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../../core/contracts/llm.dart';
 import '../capabilities.dart';
@@ -41,6 +42,9 @@ class OpenAiCompatClient extends LlmClient {
   final CapsLookup _capsOf;
   final SamplingLookup? _samplingOf;
   final Dio _dio;
+
+  @visibleForTesting
+  Dio get dio => _dio;
 
   String get host => hostOf(baseUrl);
   bool get isLlamaCpp => preset == 'llamacpp' || preset == 'nas';
@@ -195,6 +199,10 @@ class OpenAiCompatClient extends LlmClient {
 
   Map<String, dynamic> buildBody(LlmRequest req) {
     final caps = _capsOf(req.modelId) ?? guessCaps(req.modelId, preset: preset);
+    // "Answer without tools": llama.cpp keeps the tool list in the prompt with tool_choice none, so the cached prompt
+    // stays valid (without the list it re-reads the whole chat, 30 s or more on a Pi). Other servers get no tools.
+    final noCalls = req.toolChoice == 'none';
+    final sendTools = req.tools.isNotEmpty && (!noCalls || isLlamaCpp);
     final body = <String, dynamic>{
       'model': req.modelId,
       'messages': normalizeSystem(req.messages).map(_message).toList(),
@@ -202,10 +210,11 @@ class OpenAiCompatClient extends LlmClient {
       if (req.stream && preset != 'mistral') 'stream_options': {'include_usage': true},
       if (req.temperature != null) 'temperature': req.temperature,
       if (req.maxTokens != null) (preset == 'openai' ? 'max_completion_tokens' : 'max_tokens'): req.maxTokens,
-      if (req.tools.isNotEmpty)
+      if (sendTools)
         'tools': [
           for (final t in req.tools) {'type': 'function', 'function': {'name': t.name, 'description': t.description, 'parameters': t.parameters}},
         ],
+      if (sendTools && noCalls) 'tool_choice': 'none',
     };
     if (isLlamaCpp) {
       body['timings_per_token'] = false;
@@ -292,6 +301,7 @@ class OpenAiCompatClient extends LlmClient {
     var budgetSent = false;
     String? completionId;
     String? finish;
+    var sawDone = false;
     int? promptTokens, completionTokens;
     double? tps;
     var completionChars = 0;
@@ -301,7 +311,10 @@ class OpenAiCompatClient extends LlmClient {
         if (cancel?.isCancelled ?? false) break;
         final data = ev.data.trim();
         if (data.isEmpty) continue;
-        if (data == '[DONE]') break;
+        if (data == '[DONE]') {
+          sawDone = true;
+          break;
+        }
         final j = tryJsonObject(data);
         if (j == null) continue;
         final err = j['error'];
@@ -369,6 +382,12 @@ class OpenAiCompatClient extends LlmClient {
     }
     for (final e in think.flush()) {
       yield e;
+    }
+    // Neither a finish_reason nor [DONE]: the server stopped in the middle (crash, restart, dropped connection).
+    // The text so far stays, half-streamed tool calls are dropped.
+    if (!sawDone && finish == null) {
+      yield cutOffError(host);
+      return;
     }
     final calls = tools.build();
     for (final c in calls) {

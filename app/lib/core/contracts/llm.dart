@@ -50,9 +50,10 @@ class LlmMessage {
   final List<LlmToolCall> toolCalls; // assistant messages that called tools
   final String? toolCallId; // tool results
   final String? toolName;
+  final bool isError; // tool results: the tool failed
   final String? reasoning; // previous reasoning, only replayed if the provider wants it
   const LlmMessage(this.role, this.content,
-      {this.images = const [], this.toolCalls = const [], this.toolCallId, this.toolName, this.reasoning});
+      {this.images = const [], this.toolCalls = const [], this.toolCallId, this.toolName, this.isError = false, this.reasoning});
 }
 
 /// JSON-schema tool definition sent to the model (OpenAI "function" shape).
@@ -71,6 +72,10 @@ class LlmRequest {
   final double? temperature;
   final int? maxTokens;
   final bool stream;
+
+  /// 'none': answer without calling a tool. [tools] are still sent where the backend allows it, so the prompt starts
+  /// the same as in the other rounds and llama.cpp reuses its cache (the tool list comes first in the prompt).
+  final String? toolChoice;
   const LlmRequest({
     required this.modelId,
     required this.messages,
@@ -79,6 +84,7 @@ class LlmRequest {
     this.temperature,
     this.maxTokens,
     this.stream = true,
+    this.toolChoice,
   });
 }
 

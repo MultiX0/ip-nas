@@ -81,6 +81,10 @@ Assistant: A GB of RAM is free (out of B GB).''');
 const smallModelAnswerNote =
     '\n\n(Answer the user now from this result, in their language. Copy numbers exactly. Do not call the same tool again.)';
 
+/// The note for a failed tool: without it small models make up the values the tool could not read.
+const smallModelErrorNote =
+    '\n\n(This tool failed. Tell the user in one or two sentences what went wrong, in their language. Do not guess or make up any values.)';
+
 String memoriesBlock(List<String> lines) => '# What you know about the user\n${lines.map((l) => '- $l').join('\n')}';
 
 String skillsBlock(List<(String, String)> skills) {
@@ -110,7 +114,7 @@ String memoriesNote(List<String> memories) {
 }
 
 final _timeWords = RegExp(
-    r'(\btime\b|\bclock\b|\bdate\b|\btoday\b|\btomorrow\b|\byesterday\b|\bnow\b|\bday\b|\bweek\b|\bmonth\b|\byear\b|\bschedule\b|\bremind|\bwhen\b|'
+    r'(\btime\b|\bclock\b|\bdate\b|\btoday\b|\btomorrow\b|\byesterday\b|\bday\b|\bweek\b|\bmonth\b|\byear\b|\bschedule\b|\bremind|\bwhen\b|'
     r'الوقت|الساعة|ساعة|التاريخ|اليوم|بكرة|غدا|غداً|أمس|امبارح|الأسبوع|الشهر|السنة|متى)',
     caseSensitive: false);
 

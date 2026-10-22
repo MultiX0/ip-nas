@@ -22,6 +22,7 @@ import '../../core/widgets/nur_icons.dart';
 import '../../core/widgets/nur_logo.dart';
 import '../../core/widgets/provider_logo.dart';
 import '../chat/engine/live_store.dart';
+import '../providers/foreground_gate.dart';
 import 'call_backdrop.dart';
 import 'call_captions.dart';
 import 'call_controls.dart';
@@ -41,7 +42,7 @@ class VoiceCallScreen extends ConsumerStatefulWidget {
   ConsumerState<VoiceCallScreen> createState() => _VoiceCallScreenState();
 }
 
-class _VoiceCallScreenState extends ConsumerState<VoiceCallScreen> with SingleTickerProviderStateMixin {
+class _VoiceCallScreenState extends ConsumerState<VoiceCallScreen> with SingleTickerProviderStateMixin, WidgetsBindingObserver {
   VoiceCallController? _c;
   bool _captions = true;
   bool _needsKey = false;
@@ -71,6 +72,7 @@ class _VoiceCallScreenState extends ConsumerState<VoiceCallScreen> with SingleTi
     // Risky tools asked for during a call are approved here (otherwise they would be denied while the chat screen is closed).
     _broker = ref.read(toolApprovalBrokerProvider);
     _broker.register(_approve);
+    WidgetsBinding.instance.addObserver(this);
     _ticker = createTicker(_onTick)..start();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (mounted) setState(() => _shown = true);
@@ -133,7 +135,13 @@ class _VoiceCallScreenState extends ConsumerState<VoiceCallScreen> with SingleTi
     }
     try {
       final engine = ref.read(chatEngineProvider);
-      final c = VoiceCallController(engine: engine, fish: fish, prefs: () => ref.read(voicePrefsProvider).value ?? prefs, chatId: widget.chatId);
+      final c = VoiceCallController(
+        engine: engine,
+        fish: fish,
+        prefs: () => ref.read(voicePrefsProvider).value ?? prefs,
+        chatId: widget.chatId,
+        gate: ref.read(foregroundGateProvider),
+      );
       c.addListener(_onController);
       setState(() => (_c = c, _needsKey = false, _setupError = null));
       await c.start(); // opens the warm TTS socket right away
@@ -153,8 +161,18 @@ class _VoiceCallScreenState extends ConsumerState<VoiceCallScreen> with SingleTi
     }
   }
 
+  /// Phones only report `paused` when the app is in the background; a minimised desktop window keeps the call.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final c = _c;
+    if (c == null) return;
+    if (state == AppLifecycleState.paused) unawaited(c.pause());
+    if (state == AppLifecycleState.resumed) unawaited(c.resume());
+  }
+
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     _broker.unregister(_approve);
     _ticker.dispose();
     _c?.removeListener(_onController);

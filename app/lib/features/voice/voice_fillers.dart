@@ -25,16 +25,20 @@ const _phrases = <String, Map<FillerKind, List<String>>>{
 };
 
 class VoiceFillers {
-  VoiceFillers(this.fish);
+  /// [cacheDir] is where the clips are kept (the app support folder unless a test passes its own).
+  VoiceFillers(this.fish, {Future<Directory> Function()? cacheDir}) : _cacheDir = cacheDir ?? _appCacheDir;
   final FishAudio fish;
+  final Future<Directory> Function() _cacheDir;
   final _clips = <String, Uint8List>{}; // key = voice|lang|kind|index
   final _rng = math.Random();
   String? _voice;
 
+  static Future<Directory> _appCacheDir() async => Directory(p.join((await getApplicationSupportDirectory()).path, 'voice_fillers'));
+
   /// Generates (or loads from disk) every filler for [voiceId] in the background. Safe to call on every call start.
   Future<void> prepare({required String voiceId, required String model, double speed = 1.0}) async {
     _voice = voiceId;
-    final dir = Directory(p.join((await getApplicationSupportDirectory()).path, 'voice_fillers'));
+    final dir = await _cacheDir();
     await dir.create(recursive: true);
     final jobs = <Future<void>>[];
     _phrases.forEach((lang, kinds) {

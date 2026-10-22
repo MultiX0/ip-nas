@@ -390,6 +390,12 @@ class AssistantTurnView extends ConsumerWidget {
       }
       if (m.status == 'error') {
         children.add(_ErrorBox(text: m.errorText ?? 'Something went wrong.', onRetry: isLast && !busy ? () => guard(context, () => ref.read(chatEngineImplProvider).retry(chatId, m)) : null));
+      } else if (m.status == 'done' && (m.errorText ?? '').isNotEmpty) {
+        // For example a reply cut off by the length limit.
+        children.add(Padding(
+          padding: const EdgeInsets.only(top: 4),
+          child: Text(m.errorText!, style: TextStyle(color: context.nur.subtle, fontStyle: FontStyle.italic, fontSize: 13)),
+        ));
       }
     }
     final showFooter = !turnStreaming && !(busy && isLast) && item.last.status != 'error';

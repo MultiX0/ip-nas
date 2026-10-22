@@ -3,6 +3,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart' show visibleForTesting;
 
 import '../../../core/contracts/llm.dart';
 import '../capabilities.dart';
@@ -25,6 +26,9 @@ class OllamaClient extends LlmClient {
   /// Family sampling preset or the user's values (sent as options).
   final SamplingLookup? samplingOf;
   final Dio _dio;
+
+  @visibleForTesting
+  Dio get dio => _dio;
   String get host => hostOf(baseUrl);
 
   static String _normalize(String u) {
@@ -110,7 +114,7 @@ class OllamaClient extends LlmClient {
       'model': req.modelId,
       'messages': OpenAiCompatClient.normalizeSystem(req.messages).map(_message).toList(),
       'stream': req.stream,
-      if (req.tools.isNotEmpty)
+      if (req.tools.isNotEmpty && req.toolChoice != 'none')
         'tools': [
           for (final t in req.tools) {'type': 'function', 'function': {'name': t.name, 'description': t.description, 'parameters': t.parameters}},
         ],
@@ -149,7 +153,6 @@ class OllamaClient extends LlmClient {
     }
     final think = ThinkTagSplitter();
     final calls = <LlmToolCall>[];
-    String finish = 'stop';
     try {
       await for (final j in parseNdjson(r.data!.stream)) {
         if (cancel?.isCancelled ?? false) break;
@@ -183,7 +186,7 @@ class OllamaClient extends LlmClient {
           }
         }
         if (j['done'] == true) {
-          finish = (j['done_reason'] as String?) ?? 'stop';
+          final finish = (j['done_reason'] as String?) ?? 'stop';
           for (final e in think.flush()) {
             yield e;
           }
@@ -209,12 +212,10 @@ class OllamaClient extends LlmClient {
       yield const DoneEvent('cancelled');
       return;
     }
+    // The stream ended without the "done" line: the server stopped in the middle. The text so far stays.
     for (final e in think.flush()) {
       yield e;
     }
-    for (final c in calls) {
-      yield ToolCallEvent(c);
-    }
-    yield DoneEvent(calls.isNotEmpty ? 'tool_calls' : finish);
+    yield cutOffError(host);
   }
 }

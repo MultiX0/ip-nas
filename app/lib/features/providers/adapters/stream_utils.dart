@@ -2,6 +2,7 @@
 // tool-call assembly and readable HTTP error mapping.
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io' show HttpException, SocketException;
 
 import 'package:dio/dio.dart';
 
@@ -87,7 +88,13 @@ class ThinkTagSplitter {
       final tag = _inThink ? _close : _open;
       final i = s.indexOf(tag);
       if (i >= 0) {
-        _emit(out, s.substring(0, i));
+        final before = s.substring(0, i);
+        // Visible text before the tag in the same chunk: the tag is part of the answer.
+        if (!_inThink && before.trim().isNotEmpty) {
+          _emit(out, s);
+          break;
+        }
+        _emit(out, before);
         _inThink = !_inThink;
         s = s.substring(i + tag.length);
         if (!_inThink) s = s.replaceFirst(RegExp(r'^\s+'), '');
@@ -189,6 +196,10 @@ Future<ErrorEvent> errorFromStreamResponse(Response<ResponseBody> r, String host
   return httpError(r.statusCode ?? 0, body, host);
 }
 
+/// A stream that ended without the server's end marker: the server stopped or the connection dropped mid-reply.
+ErrorEvent cutOffError(String host) =>
+    ErrorEvent('The reply from $host stopped before it was complete. The model server may have stopped or restarted.');
+
 ErrorEvent httpError(int status, String body, String host) {
   String? detail;
   try {
@@ -239,9 +250,12 @@ ErrorEvent dioError(Object e, String host) {
       case DioExceptionType.cancel:
         return const ErrorEvent('Cancelled');
       default:
+        if (e.error is HttpException || e.error is SocketException) return cutOffError(host);
         return ErrorEvent('Network error talking to $host: ${e.message ?? e.error ?? 'unknown'}');
     }
   }
+  // The connection closed while the reply was streaming (server stopped, proxy lost its model server).
+  if (e is HttpException || e is SocketException) return cutOffError(host);
   if (e is FormatException) return ErrorEvent('$host sent a response Nur could not read (${e.message}).');
   if (e is TimeoutException) return ErrorEvent('$host did not answer in time.');
   return ErrorEvent('Unexpected error: $e');

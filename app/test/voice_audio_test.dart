@@ -1,3 +1,4 @@
+import 'dart:math' as math;
 import 'dart:typed_data';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -55,6 +56,42 @@ void main() {
       final events = _run(vad, [(10, 0), (7, 6000), (30, 0)]);
       expect(events.map((e) => e.$2).toList(), [VadEvent.speechStart, VadEvent.speechEnd]);
       expect(vad.takeUtterance(), isNull);
+    });
+  });
+
+  group('EnergyVad while Nur speaks', () {
+    // Nur's voice: syllables at 4.5 Hz, peak RMS 0.15. The mic hears it [echo] times as loud, 60 ms late, over room
+    // noise; the user talks at RMS 0.12 from [userAt] for 1.5 s.
+    double out(int ms) => ms < 0 ? 0 : 0.15 * (0.55 + 0.45 * math.sin(ms / 1000 * 2 * math.pi * 4.5));
+    List<int> starts(double echo, {int? userAt}) {
+      final vad = EnergyVad();
+      for (var i = 0; i < 50; i++) {
+        vad.add(_pcm(20, 60));
+      }
+      vad.playbackActive = true;
+      final hits = <int>[];
+      for (var ms = 0; ms < 6000; ms += 20) {
+        vad.playbackRms = out(ms);
+        final e = echo * out(ms - 60);
+        final u = userAt != null && ms >= userAt && ms < userAt + 1500 ? 0.12 : 0.0;
+        final level = math.sqrt(e * e + u * u + 0.0018 * 0.0018);
+        if (vad.add(_pcm(20, (level * 32768).round())).contains(VadEvent.speechStart)) hits.add(ms);
+      }
+      return hits;
+    }
+
+    test('the user talking over Nur is heard', () {
+      for (final echo in [0.0, 0.03, 0.1]) {
+        final hits = starts(echo, userAt: 3000);
+        expect(hits, hasLength(1), reason: 'echo $echo');
+        expect(hits.single, inInclusiveRange(3300, 3700), reason: 'echo $echo');
+      }
+    });
+
+    test("Nur's own echo is not taken for the user", () {
+      for (final echo in [0.03, 0.4, 0.8]) {
+        expect(starts(echo), isEmpty, reason: 'echo $echo');
+      }
     });
   });
 

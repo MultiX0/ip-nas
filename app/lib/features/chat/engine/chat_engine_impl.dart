@@ -17,8 +17,9 @@ import '../../context/turn_planner.dart';
 import '../../memory/memory_repo.dart' show memoryRepoProvider;
 import '../../providers/adapters/stream_utils.dart' show newCallId;
 import '../../providers/capabilities.dart';
+import '../../providers/foreground_gate.dart';
 import '../../providers/llm_registry.dart';
-import '../../skills/builtin_skills_v3.dart' show skillQuickCard;
+import '../../skills/builtin_skills.dart' show skillQuickCard;
 import '../../skills/skills_repo.dart' show skillsRepoProvider;
 import '../../tools/tool_call_repair.dart';
 import '../../voice/speech_text.dart' show stripDirections;
@@ -36,10 +37,14 @@ const _maxSmallToolIterations = 3;
 /// Max reply length for small models with thinking off: stops a looping 2 B model from writing for minutes.
 const _smallMaxTokens = 1536;
 
+/// Shown under a reply that reached the length limit.
+const cutOffNote = 'The reply reached the length limit and was cut off. Ask me to continue.';
+
 class _StreamResult {
   String text = '';
   String? error;
   bool cancelled = false;
+  bool cutOff = false; // stopped by the max_tokens limit
   final calls = <LlmToolCall>[];
 }
 
@@ -59,6 +64,7 @@ class ChatEngineImpl implements ChatEngine {
   ChatRepo get _repo => _ref.read(chatRepoProvider);
   LlmRegistry get _reg => _ref.read(llmRegistryProvider);
   LiveStore get _live => _ref.read(liveStoreProvider);
+  ForegroundGate get _gate => _ref.read(foregroundGateProvider);
 
   bool isBusy(String chatId) => _live.isActive(chatId);
 
@@ -77,7 +83,7 @@ class ChatEngineImpl implements ChatEngine {
           );
       // The small-model fast path only confirms "I'll remember" when the fact was really stored.
       if (!r.isError && !r.content.startsWith('Not saved')) _remembered[chatId] = fact;
-    } catch (_) {/* memory off or not wired: the model can still call memory_save itself */}
+    } catch (_) {/* not saved: the planner then lets the model answer */}
   }
 
   /// chatId -> fact saved by [_autoRemember] for the current turn.
@@ -164,6 +170,7 @@ class ChatEngineImpl implements ChatEngine {
 
   final _prewarmedAt = <String, DateTime>{};
   final _prewarming = <String>{};
+  final _prewarmCancels = <String, LlmCancelToken>{};
 
   /// Sends the prefix of the next turn (same system text, tools and history, plus the time note as the user turn)
   /// with max_tokens 1, so llama.cpp / Ollama cache it. Local models only (a cloud call costs money), and the same
@@ -173,6 +180,8 @@ class ChatEngineImpl implements ChatEngine {
     final slot = chatId ?? '';
     if (_prewarming.contains(slot)) return;
     _prewarming.add(slot);
+    final cancel = LlmCancelToken();
+    _prewarmCancels[slot] = cancel;
     try {
       if (chatId != null && isBusy(chatId)) return;
       final chat = chatId == null ? null : await _repo.getChat(chatId);
@@ -204,13 +213,15 @@ class ChatEngineImpl implements ChatEngine {
         temperature: entry.overrides.temperature,
         maxTokens: 1,
       );
-      await for (final ev in client.chat(req).timeout(const Duration(minutes: 5))) {
+      if (cancel.isCancelled) return;
+      await for (final ev in client.chat(req, cancel: cancel).timeout(const Duration(minutes: 5))) {
         if (ev is ErrorEvent) break;
       }
     } catch (_) {
       // Best effort: without a warm cache the real turn only starts a bit slower.
     } finally {
       _prewarming.remove(slot);
+      if (identical(_prewarmCancels[slot], cancel)) _prewarmCancels.remove(slot);
     }
   }
 
@@ -283,6 +294,13 @@ class ChatEngineImpl implements ChatEngine {
     final cancel = LlmCancelToken();
     _cancels[chatId] = cancel;
     _live.setActive(chatId, '');
+    // Titles, memory extraction and summaries wait while this reply is written; a running one stops.
+    final lease = _gate.hold();
+    // A prewarm still running would make this reply queue behind it on a one-slot server (a fresh voice chat
+    // prewarms 30-40 s on a Pi).
+    for (final p in _prewarmCancels.values.toList()) {
+      p.cancel();
+    }
     final client = _reg.clientFor(model.providerId);
     final full = StringBuffer();
     var tip = parentId;
@@ -293,7 +311,13 @@ class ChatEngineImpl implements ChatEngine {
     final maxIter = small ? _maxSmallToolIterations : _maxToolIterations;
     // Calls already run in this reply (tool + arguments); a repeat is answered from the earlier result instead.
     final seenCalls = <String>{};
+    // A tool that fails a second time in one reply will not start working: the model has to answer instead.
+    final failedTools = <String>{};
     var forceAnswer = false;
+    // Small models: when a tool cannot run at all (NAS unreachable, no access) or a second call fails in one reply,
+    // the app says what failed (asked to explain the errors, they make up the data the tools could not get).
+    var failures = 0;
+    ({String tool, String error})? lastFailure;
     // Small models: the turn planner answers trivial turns itself, runs the tools a clear request needs and frames the
     // model's answer (see context/turn_planner.dart). [handled] = answered without the model.
     var handled = false;
@@ -307,7 +331,7 @@ class ChatEngineImpl implements ChatEngine {
     try {
       if (client == null) throw 'The provider for ${model.displayName} is not available.';
       if (small) {
-        final p = await _runPlan(chatId, tip, model, settings, out, fromVoice, seenCalls);
+        final p = await _runPlan(chatId, tip, model, settings, out, fromVoice, seenCalls, cancel);
         if (p != null) {
           plan = p.plan;
           userText = p.userText;
@@ -321,10 +345,12 @@ class ChatEngineImpl implements ChatEngine {
           }
         }
       }
-      for (var iter = 0; !handled && iter <= maxIter + retries; iter++) {
+      for (var iter = 0; !handled && !cancel.isCancelled && iter <= maxIter + retries; iter++) {
         await _repo.setLeaf(chatId, tip);
-        final allowTools = settings.tools && model.caps.tools && iter < maxIter && !forceAnswer;
-        final ctx = await _assemble(chatId, model, allowTools);
+        // The tool list stays in every round; a round that must answer sends tool_choice "none" (same prompt start).
+        final offerTools = settings.tools && model.caps.tools;
+        final allowTools = offerTools && iter < maxIter && !forceAnswer && !(plan?.noTools ?? false);
+        final ctx = await _assemble(chatId, model, offerTools);
         if (cancel.isCancelled) break;
         final messages = _shapeMessages(ctx.messages, model,
             small: small, voiceHint: voiceHint, voiceReminder: voiceReminder, turnHint: turnHint);
@@ -342,16 +368,27 @@ class ChatEngineImpl implements ChatEngine {
         final req = LlmRequest(
           modelId: model.modelId,
           messages: messages,
-          tools: allowTools ? ctx.tools : const [],
+          tools: ctx.tools,
+          toolChoice: allowTools || ctx.tools.isEmpty ? null : 'none',
           reasoning: level,
           temperature: retryTemperature ?? _reg.entryByRef(model.ref)?.overrides.temperature,
           maxTokens: small && level == ReasoningLevel.off ? _smallMaxTokens : null,
         );
-        final lang = plan?.lang ?? detectLang(userText);
+        // An explicit request for a language ("say it in Arabic") turns the language checks off.
+        final lang = asksForLanguage(userText) ? '' : (plan?.lang ?? detectLang(userText));
         final allowIntro = plan != null && (plan.intent == TurnIntent.greeting || plan.intent == TurnIntent.identity);
         final gate = small && userText.isNotEmpty ? _LeadGate(userText, lang, allowIntro, canBlock: retries == 0) : null;
         final r = await _streamOne(chatId, aid, client, req, cancel, out, gate: gate);
-        if (r.error == null && !r.cancelled) await _repairCalls(aid, r, {for (final t in req.tools) t.name});
+        if (r.error == null && !r.cancelled) {
+          await _repairCalls(chatId, aid, r, {if (allowTools) for (final t in req.tools) t.name}, plan?.lang,
+              failure: lastFailure, voice: fromVoice);
+        }
+        // Small models sometimes write a whole answer, call a tool anyway and answer again after it (a voice call said
+        // everything twice). A written answer ends the turn; a short "let me check" before a call does not.
+        if (small && r.calls.isNotEmpty && r.error == null && !r.cancelled && looksAnswered(r.text)) {
+          r.calls.clear();
+          await _repo.updateMessage(aid, const MessagesCompanion(toolCallsJson: Value(null)));
+        }
         // Drama 3 direction tags are for the voice only; keep the saved chat text clean.
         if (fromVoice && r.text.contains(RegExp(r'\[[^\]\n]{1,40}\]|</?(emphasis|whisper)>'))) {
           r.text = stripDirections(r.text);
@@ -432,8 +469,14 @@ class ChatEngineImpl implements ChatEngine {
             res = ToolResult('You already called ${call.name} with these arguments in this reply; its result is above. '
                 'Do not call it again. Answer the user now.');
           } else {
-            res = await _execTool(chatId, call);
+            res = await _execTool(chatId, call, cancel: cancel);
             ranTools = true;
+            if (res.isError && !failedTools.add(call.name)) forceAnswer = true;
+            if (res.isError && res.content != ToolResult.declined.content) {
+              // A NAS that cannot be reached (or a tool that is off) will not work on another try either.
+              failures += res.unavailable ? 2 : 1;
+              lastFailure = (tool: call.name, error: res.content);
+            }
             // After an action that changes things, reading the same state again is legitimate.
             if (_riskOf(call) != ToolRisk.safe) seenCalls.clear();
           }
@@ -445,6 +488,14 @@ class ChatEngineImpl implements ChatEngine {
           ));
         }
         if (cancel.isCancelled) break;
+        if (small && failures >= 2 && lastFailure != null) {
+          final a = toolFailedReply(lastFailure.tool, lastFailure.error, plan?.lang ?? await _lastUserLang(chatId), voice: fromVoice);
+          tip = await _writeReply(chatId, tip, model, a, out, voice: fromVoice, mood: 'gently');
+          if (full.isNotEmpty) full.write('\n\n');
+          full.write(a);
+          completed = true;
+          break;
+        }
       }
       await _repo.setLeaf(chatId, tip);
     } catch (e) {
@@ -465,25 +516,20 @@ class ChatEngineImpl implements ChatEngine {
         await _repo.setLeaf(chatId, eid);
       } catch (_) {}
     } finally {
+      lease.release();
       _cancels.remove(chatId);
       _remembered.remove(chatId);
       _live.setActive(chatId, null);
     }
     out?.add(ReplyDone(full.toString()));
-    if (completed) {
-      // A turn answered by the planner needs no background model calls (memory extraction, title): on a Pi each
-      // costs 10-60 s of the single llama.cpp slot and would delay the next reply.
-      if (!handled) _afterTurn(chatId, model);
-      unawaited(_maybeTitle(chatId, model, useModel: !handled));
-    }
+    if (completed) unawaited(_afterTurn(chatId, model, handled: handled, voice: fromVoice));
   }
-
 
   /// Runs the turn planner for the latest user message: a fixed reply (no model), tool calls the app makes itself
   /// (recorded in the thread like model calls, approvals included), an answer composed from their data, or the hint
   /// that frames the model's answer. Null when the planner does not apply (images, no user message).
   Future<({TurnPlan plan, String userText, String tip, String hint, String? reply, bool ranTools})?> _runPlan(String chatId, String tip,
-      LlmModel model, ChatSettings settings, StreamController<ReplyEvent>? out, bool voice, Set<String> seen) async {
+      LlmModel model, ChatSettings settings, StreamController<ReplyEvent>? out, bool voice, Set<String> seen, LlmCancelToken cancel) async {
     final t = await _repo.thread(chatId);
     final path = [for (final m in t.path) if (m.kind == 'message') m];
     final ui = path.lastIndexWhere((m) => m.role == 'user');
@@ -509,8 +555,10 @@ class ChatEngineImpl implements ChatEngine {
     );
     final plan = planTurn(userText, ctx: ctx);
     String? reply = plan.reply;
-    // "I'll remember" only when the app really stored it (memory can be off).
-    if (plan.intent == TurnIntent.remember && _remembered[chatId] == null) reply = null;
+    // "I'll remember" only when the app really stored it.
+    if (plan.intent == TurnIntent.remember && _remembered[chatId] == null) {
+      reply = await _memoryOn() ? null : memoryOffReply(plan.lang);
+    }
     if (plan.intent == TurnIntent.recallMemory) reply = await _recall(chatId, plan, userText, voice);
     if (reply != null) {
       final id = await _writeReply(chatId, tip, model, reply, out, voice: voice, mood: moodFor(plan, reply));
@@ -558,7 +606,7 @@ class ChatEngineImpl implements ChatEngine {
       ));
       tip = tid;
       await _repo.setLeaf(chatId, tid);
-      final res = await _execTool(chatId, call);
+      final res = await _execTool(chatId, call, cancel: cancel);
       ran = true;
       seen.add(toolCallKey(call.name, call.argumentsJson));
       final resultJson = await compute(_encodeResult, {'content': res.content, 'isError': res.isError, 'display': res.display});
@@ -567,14 +615,17 @@ class ChatEngineImpl implements ChatEngine {
         toolResultJson: Value(resultJson),
         status: Value(res.isError ? 'error' : 'done'),
       ));
+      // Stopped while the tool ran: no answer (the loop in _runTurn does not start either).
+      if (cancel.isCancelled) return (plan: p, userText: userText, tip: tip, hint: '', reply: null, ranTools: true);
       toolText.writeln(res.content);
       if (res.display != null) data['${res.display!['type']}'] = res.display!;
       if (c.tool == 'docker_action') {
         actionResult = res.content;
         actionError = res.isError;
       } else if (res.isError) {
-        p = p.copyWith(template: false); // the model explains the error
-        break;
+        final a = toolFailedReply(c.tool, res.content, p.lang, voice: voice);
+        final id = await _writeReply(chatId, tip, model, a, out, voice: voice, mood: 'gently');
+        return (plan: p, userText: userText, tip: id, hint: '', reply: a, ranTools: true);
       }
     }
     if (p.template || (!model.caps.tools && ran)) {
@@ -608,8 +659,7 @@ class ChatEngineImpl implements ChatEngine {
   /// "What do you know about me" from the saved memories; null (the model answers) when memory is off.
   Future<String?> _recall(String chatId, TurnPlan plan, String question, bool voice) async {
     try {
-      final v = await _ref.read(dbProvider).getSetting('memory_enabled');
-      if (v == 'false' || v == '0') return null;
+      if (!await _memoryOn()) return null;
       final all = await _ref.read(memoryRepoProvider).watchAll().first;
       final facts = [
         for (final m in all)
@@ -619,6 +669,11 @@ class ChatEngineImpl implements ChatEngine {
     } catch (_) {
       return null;
     }
+  }
+
+  Future<bool> _memoryOn() async {
+    final v = await _ref.read(dbProvider).getSetting('memory_enabled');
+    return v != 'false' && v != '0';
   }
 
   /// Stores a reply that needed no model and streams it (voice calls get a Drama 3 mood tag when direction is on).
@@ -708,6 +763,7 @@ class ChatEngineImpl implements ChatEngine {
             usage = ev;
           case DoneEvent(:final finishReason):
             if (finishReason == 'cancelled') res.cancelled = true;
+            if (finishReason == 'length') res.cutOff = true;
           case ErrorEvent(:final message):
             res.error = message;
         }
@@ -741,7 +797,8 @@ class ChatEngineImpl implements ChatEngine {
       reasoningMs: Value(rMs),
       toolCallsJson: Value(res.calls.isEmpty ? null : jsonEncode(res.calls.map((c) => c.toJson()).toList())),
       status: Value(status),
-      errorText: Value(res.error),
+      // A reply stopped by the length limit stays a normal reply; the note tells the user it is not complete.
+      errorText: Value(res.error ?? (res.cutOff && !res.cancelled && res.calls.isEmpty ? cutOffNote : null)),
       promptTokens: Value(usage?.promptTokens),
       completionTokens: Value(usage?.completionTokens),
       tokensPerSecond: Value(usage?.tokensPerSecond),
@@ -801,7 +858,7 @@ class ChatEngineImpl implements ChatEngine {
           if (m.content.trim().isEmpty && calls.isEmpty) continue;
           out.add(LlmMessage(LlmRole.assistant, m.content, toolCalls: calls));
         case 'tool':
-          out.add(LlmMessage(LlmRole.tool, m.content, toolCallId: m.toolCallId, toolName: m.toolName));
+          out.add(LlmMessage(LlmRole.tool, m.content, toolCallId: m.toolCallId, toolName: m.toolName, isError: m.status == 'error'));
       }
     }
     return out;
@@ -854,14 +911,26 @@ class ChatEngineImpl implements ChatEngine {
 
   /// Fixes tool calls from small models: calls written as plain text (`<tool_call>{..}`, `<function=..>`, LFM and
   /// Gemma formats) become real calls, and almost-JSON arguments are repaired. Only tools offered in this request count.
-  Future<void> _repairCalls(String aid, _StreamResult r, Set<String> offered) async {
+  Future<void> _repairCalls(String chatId, String aid, _StreamResult r, Set<String> offered, String? lang,
+      {({String tool, String error})? failure, bool voice = false}) async {
     if (offered.isEmpty) {
-      // No tools in this request (last round) but the model still wrote call markup: never show raw XML.
-      if (!_textCallMarker.hasMatch(r.text)) return;
+      // No calls allowed in this round, but the model still wrote call markup (or a server ignored tool_choice
+      // "none"): never run them or show raw XML.
+      if (!_textCallMarker.hasMatch(r.text) && r.calls.isEmpty) return;
       var t = r.text.replaceAll(_textCallBlock, '').trim();
-      if (t.isEmpty) t = 'I could not finish this with my tools. Please try again or ask in a different way.';
+      if (t.isEmpty) {
+        final l = lang ?? await _lastUserLang(chatId);
+        // Say what failed when a tool failed in this reply; otherwise a plain "could not finish".
+        t = failure != null
+            ? toolFailedReply(failure.tool, failure.error, l, voice: voice)
+            : l == 'ar'
+                ? 'لم أتمكن من إنهاء ذلك بأدواتي. حاول مرة أخرى أو اسأل بطريقة أخرى.'
+                : 'I could not finish this with my tools. Please try again or ask in a different way.';
+      }
       r.text = t;
-      await _repo.updateMessage(aid, MessagesCompanion(content: Value(t)));
+      final dropped = r.calls.isNotEmpty;
+      r.calls.clear();
+      await _repo.updateMessage(aid, MessagesCompanion(content: Value(t), toolCallsJson: dropped ? const Value(null) : const Value.absent()));
       return;
     }
     var changed = false;
@@ -890,34 +959,71 @@ class ChatEngineImpl implements ChatEngine {
     ));
   }
 
-  Future<ToolResult> _execTool(String chatId, LlmToolCall call) async {
+  Future<String> _lastUserLang(String chatId) async {
+    final t = await _repo.thread(chatId);
+    for (final m in t.path.reversed) {
+      if (m.role == 'user') return detectLang(stripFileBlocks(m.content));
+    }
+    return 'en';
+  }
+
+  /// Runs one tool. Stop ends the wait at once: a NAS that does not answer would otherwise keep the reply busy for
+  /// up to a minute. The tool may still finish in the background; its result is dropped, and an approval given after
+  /// the stop counts as a no.
+  Future<ToolResult> _execTool(String chatId, LlmToolCall call, {LlmCancelToken? cancel}) async {
+    const stoppedResult = ToolResult('Cancelled by the user.', isError: true);
+    if (cancel?.isCancelled ?? false) return stoppedResult;
     final broker = _ref.read(toolApprovalBrokerProvider);
+    Future<ToolResult> run() async {
+      try {
+        return await _ref.read(toolRuntimeProvider).execute(call, chatId: chatId, approve: (c, risk) async {
+          if (risk == ToolRisk.safe) return true;
+          final ok = await broker.request(ApprovalRequest(chatId, c, risk));
+          return ok && !(cancel?.isCancelled ?? false);
+        });
+      } catch (e) {
+        return ToolResult('The tool failed: ${_plain(e)}', isError: true);
+      }
+    }
+
+    if (cancel == null) return run();
+    final stopped = Completer<ToolResult>();
+    cancel.onCancel(() {
+      if (!stopped.isCompleted) stopped.complete(stoppedResult);
+    });
+    return Future.any([run(), stopped.future]);
+  }
+
+  /// Background work after a finished turn: memory extraction, automatic summary and the chat title. A turn the
+  /// planner answered needs none of these model calls (on a Pi each costs 10-60 s of the single llama.cpp slot).
+  /// On a local server they also replace the chat's cached prompt, so the chat is read in again afterwards while
+  /// the user reads (the next reply stops that early); otherwise reply 2 of a new chat re-read the whole prompt.
+  Future<void> _afterTurn(String chatId, LlmModel model, {required bool handled, required bool voice}) async {
     try {
-      return await _ref.read(toolRuntimeProvider).execute(call, chatId: chatId, approve: (c, risk) async {
-        if (risk == ToolRisk.safe) return true;
-        return broker.request(ApprovalRequest(chatId, c, risk));
-      });
+      await Future.wait([
+        if (!handled) _ref.read(contextAssemblerProvider).afterTurn(chatId: chatId, model: model),
+        _maybeTitle(chatId, model, useModel: !handled),
+      ]);
+      if (handled || voice || !_ref.mounted || isBusy(chatId)) return;
+      if (_reg.entryByRef(model.ref)?.isLocal ?? false) await prewarm(chatId);
     } catch (e) {
-      return ToolResult('The tool failed: ${_plain(e)}', isError: true);
+      if (_ref.mounted) debugPrint('afterTurn failed: $e');
     }
   }
 
-  void _afterTurn(String chatId, LlmModel model) {
-    Future<void>(() async {
-      try {
-        await _ref.read(contextAssemblerProvider).afterTurn(chatId: chatId, model: model);
-      } catch (e) {
-        debugPrint('afterTurn failed: $e');
-      }
-    });
-  }
+  /// Chats with a title job waiting or running.
+  final _titling = <String>{};
 
   Future<void> _maybeTitle(String chatId, LlmModel model, {bool useModel = true}) async {
+    if (!_titling.add(chatId)) return;
     try {
+      // A model title waits while a reply or a voice call holds the model (see foreground_gate.dart).
+      if (useModel) await _gate.whenFree();
       final t = await _repo.thread(chatId);
       if (t.chat == null || t.chat!.title != 'New chat') return;
+      // Titled from the first message, also when the first reply was stopped or failed and the chat went on.
       final users = t.path.where((m) => m.role == 'user').toList();
-      if (users.length != 1) return;
+      if (users.isEmpty) return;
       final user = stripFileBlocks(users.first.content);
       final fallback = _fallbackTitle(user);
       final client = _reg.clientFor(model.providerId);
@@ -935,18 +1041,27 @@ class ChatEngineImpl implements ChatEngine {
           temperature: 0.2,
           maxTokens: canSkipThinking ? 16 : null,
         );
-        final buf = StringBuffer();
-        await for (final ev in client.chat(req).timeout(const Duration(seconds: 45))) {
-          if (ev is TextDelta) buf.write(ev.text);
-          if (ev is ErrorEvent) break;
+        try {
+          title = await _gate.background((stop) async {
+            final buf = StringBuffer();
+            await for (final ev in client.chat(req, cancel: stop).timeout(const Duration(seconds: 45))) {
+              if (ev is TextDelta) buf.write(ev.text);
+              if (ev is ErrorEvent) break;
+            }
+            return cleanTitle(buf.toString(), user);
+          });
+        } on BackgroundCancelled {
+          return; // a reply needed the model: the chat is named after the next turn
         }
-        title = cleanTitle(buf.toString(), user);
       }
       if (title.isEmpty || title.length > 80) title = fallback;
       final again = await _repo.getChat(chatId);
       if (again != null && again.title == 'New chat' && title.isNotEmpty) await _repo.rename(chatId, title);
     } catch (e) {
-      debugPrint('auto title failed: $e');
+      // After the app shut down (provider disposed) there is nothing to report.
+      if (_ref.mounted) debugPrint('auto title failed: $e');
+    } finally {
+      _titling.remove(chatId);
     }
   }
 
@@ -965,6 +1080,14 @@ class ChatEngineImpl implements ChatEngine {
 }
 
 final _textCallMarker = RegExp(r'<tool_call>|<function=|<\|tool_call_start\|>');
+
+/// Text that already answers: two or more sentences and at least 100 characters (a preface before a tool call is
+/// one short sentence).
+bool looksAnswered(String text) {
+  final t = text.replaceAll(_textCallBlock, '').trim();
+  if (t.length < 100) return false;
+  return RegExp(r'[.!?\u061F](\s|$)').allMatches(t).length >= 2;
+}
 final _textCallBlock = RegExp(r'<tool_call>[\s\S]*?(</tool_call>|$)|<function=[\s\S]*?(</function>|$)|<\|tool_call_start\|>[\s\S]*?(<\|tool_call_end\|>|$)');
 
 /// Cleans a model-written chat title: first line, no "Title:" prefix, quotes, markdown or trailing punctuation, at

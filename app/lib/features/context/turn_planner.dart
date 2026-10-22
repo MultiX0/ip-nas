@@ -58,6 +58,9 @@ class TurnPlan {
   final String? skill;
   /// The fact to save ("remember that ..."); the engine saves it and only then uses [reply].
   final String? fact;
+  /// Advice, explanations and definitions: the model answers from what it knows. Offered tools, a small model
+  /// checks the NAS instead and reports its values ("best way to cool the Pi" got the current RAM and temperature).
+  final bool noTools;
   const TurnPlan(this.intent, this.lang,
       {this.reply,
       this.calls = const [],
@@ -67,7 +70,8 @@ class TurnPlan {
       this.template = false,
       this.hint,
       this.skill,
-      this.fact});
+      this.fact,
+      this.noTools = false});
 
   TurnPlan copyWith({String? app, bool? template, String? hint}) => TurnPlan(intent, lang,
       reply: reply,
@@ -78,7 +82,8 @@ class TurnPlan {
       template: template ?? this.template,
       hint: hint ?? this.hint,
       skill: skill,
-      fact: fact);
+      fact: fact,
+      noTools: noTools);
 }
 
 class PlanContext {
@@ -92,6 +97,15 @@ class PlanContext {
   const PlanContext({this.priorUserTurns = 0, this.knownApps = const [], this.lastApp, this.voice = false});
 }
 
+
+final _askLangEn = RegExp(
+    r'\b(in|into|to)\s+(arabic|english|french|german|spanish|turkish|urdu|persian|farsi|hindi|italian|russian|chinese|japanese|korean)\b|\btranslat',
+    caseSensitive: false);
+final _askLangAr = RegExp(r'بالعربي|بالإنجليزي|بالانجليزي|بالإنكليزي|بالانكليزي|بالفرنسي|ترجم');
+
+/// The user asks for a given language or a translation ("say hello in Arabic", "ترجم هذا"), so the reply
+/// language is theirs to choose and the language lock stays off.
+bool asksForLanguage(String text) => _askLangEn.hasMatch(text) || _askLangAr.hasMatch(text);
 
 /// 'ar' when the text has more Arabic than Latin letters.
 /// Counts WORDS, not letters: "شغّل jellyfin" or "كم ال RAM الفاضية؟" are Arabic messages with Latin app names / terms.
@@ -201,7 +215,9 @@ final _healthAr = _arRx(
 final _statusQuestionEn = RegExp(r"\b(how much|how many|how hot|how full|how warm|what('?s| is| are) (the|my)|is (it|the|my)|are (the|my)|show|check|tell me|give me|current|right now|now|free|used|left|available|usage|level|and the|what about)\b|\?$|^(and|what about) ");
 final _statusQuestionAr = _arRx(r'(كم|قديش|قديه|اديش|ما هي|ما هو|شو|وش|ايش|هل|كيف|اعطني|اعرض|افحص|الان|هلا|هلق|حاليا|و(ال)?(حراره|الرام|الذاكره|الاقراص|المساحه))|؟$');
 final _knowledgeEn = RegExp(r"\b(what is an?|what are|what does|explain|define|definition|meaning of|difference between|how (do|does|can|should) (i|you|we)|how to|why (do|does|is|are)|tips?|advice|recommend\w*|should i (buy|get|use)|best way|history of)\b");
-final _knowledgeAr = _arRx(r'(اشرح|ما معني|عرف لي|الفرق بين|كيف اقوم|كيف يمكنني|كيف اعمل|نصيحه|نصائح|انصحني|لماذا|ليش|شو يعني)');
+final _knowledgeAr = _arRx(r'(اشرح|ما معني|عرف لي|الفرق بين|كيف اقوم|كيف يمكنني|كيف اعمل|نصيحه|نصائح|انصحني|تنصحني|هل تنصح|لماذا|ليش|شو يعني|'
+    r'(افضل|احسن|اسهل) (طريقه|وسيله)|ما (هي )?(ال)?طريقه|'
+    r'(كيف|ازاي|شلون) (ممكن |اقدر |بقدر )?(ابرد|اخفض|اقلل|احمي|احافظ|اصلح|احل|امنع|اتجنب|انظف|اسرع|اوفر|احسن|اجعل|اركب|اثبت|اضيف|اغير))');
 
 // Apps.
 final _appsListEn = RegExp(r"\b(which|what|list|show|any)\b.{0,25}\b(apps?|applications?|containers?|services?|dockers?)\b|\b(apps?|containers?|services?)\b.{0,20}\b(running|installed|up|on the nas|do i have)\b|\bdocker (ps|status|list)\b");
@@ -378,7 +394,7 @@ TurnPlan planTurn(String text, {PlanContext ctx = const PlanContext()}) {
   }
 
   // Everything else: the model, with the general answer frame.
-  return TurnPlan(TurnIntent.chat, lang, hint: _hint(knowledge ? 'knowledge' : 'chat', lang, ctx.voice));
+  return TurnPlan(TurnIntent.chat, lang, hint: _hint(knowledge ? 'knowledge' : 'chat', lang, ctx.voice), noTools: knowledge);
 }
 
 TurnPlan _small(TurnIntent i, String lang, PlanContext ctx, {String greeting = ''}) =>
@@ -408,6 +424,25 @@ String? resolveAppName(List<Map> items, String name) {
     if (k(x['name']).contains(n) || k(x['image']).contains(n)) return '${x['name']}';
   }
   return null;
+}
+
+/// Reply when a tool failed and a small model would have to explain it: asked to, they make up the values the tool
+/// could not read, so the app says what went wrong itself. Spoken replies leave the technical detail to the chat,
+/// where the tool card shows it.
+String toolFailedReply(String tool, String error, String lang, {bool voice = false}) {
+  final ar = lang == 'ar';
+  var e = error.trim().replaceFirst(RegExp(r'^(The tool failed|Tool failed|Failed):\s*'), '');
+  if (e.isNotEmpty && !RegExp(r'[.!?]$').hasMatch(e)) e = '$e.';
+  final what = switch (tool) {
+    'web_search' => ar ? 'لم أتمكن من البحث في الإنترنت' : "I couldn't search the web",
+    'docker_list' => ar ? 'لم أتمكن من جلب قائمة التطبيقات من الجهاز' : "I couldn't get the list of apps from the NAS",
+    'docker_logs' => ar ? 'لم أتمكن من قراءة سجلات التطبيق من الجهاز' : "I couldn't read the app's logs from the NAS",
+    'nas_system_status' => ar ? 'لم أتمكن من فحص الجهاز' : "I couldn't check the NAS",
+    _ => ar ? 'لم ينجح ذلك' : "That didn't work",
+  };
+  if (e.isEmpty) return '$what.';
+  if (voice) return ar ? '$what. التفاصيل مكتوبة في المحادثة.' : '$what. The details are in the chat.';
+  return '$what: $e';
 }
 
 /// Drama 3 mood tag for a fixed reply in a voice call.
@@ -615,6 +650,11 @@ String _youForm(String fact) {
   });
 }
 
+/// "Remember that ..." while memory is switched off.
+String memoryOffReply(String lang) => lang == 'ar'
+    ? 'الذاكرة متوقفة، لذلك لا أستطيع حفظ ذلك. يمكنك تشغيلها من الإعدادات > الذاكرة.'
+    : "Memory is turned off, so I can't save that. You can turn it on in Settings > Memory.";
+
 String rememberReply(String fact, String lang) {
   if (lang == 'ar') return 'حسناً، سأتذكر ذلك.';
   final f = _youForm(fact).replaceAll(RegExp(r'^(that|this)\s+', caseSensitive: false), '');
@@ -726,7 +766,7 @@ String statusAnswer(Map<String, dynamic> s, Set<String> focus, String lang, {boo
     } else {
       final list = disks
           .map((d) => ar
-              ? '${diskName(d)}: ${d['percent_used']}% مستخدم (${_num(d['free_gb'])} جيجابايت متاحة من ${_num(d['total_gb'])})'
+              ? '${diskName(d)}: ${d['percent_used']}% مستخدم (${_num(d['free_gb'])} جيجابايت متاحة من ${_num(d['total_gb'])} جيجابايت)'
               : '${diskName(d)}: ${d['percent_used']}% used (${_num(d['free_gb'])} GB free of ${_num(d['total_gb'])} GB)')
           .join(ar ? '، ' : ', ');
       parts.add(ar ? 'استخدام الأقراص: $list.' : 'Disk usage: $list.');

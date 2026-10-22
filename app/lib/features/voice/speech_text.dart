@@ -7,6 +7,9 @@ final _phoneme = RegExp(r'<\|phoneme_start\|>.*?<\|phoneme_end\|>');
 final _hasWords = RegExp(r'[\p{L}\p{N}]', unicode: true);
 final _speakerMarker = RegExp(r'<\|speaker:\d+\|>');
 
+/// Emoji (with skin tones, flags, joiners and variation selectors) and the space in front of them.
+final _emoji = RegExp(r'\s*[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{2300}-\u{23FF}\u{2B00}-\u{2BFF}‍️⃣]+', unicode: true);
+
 /// Removes Drama 3 performance directions (`[warmly]`, `<whisper>..</whisper>`) for on-screen captions.
 String stripDirections(String s) => s
     .replaceAll(_phoneme, '')
@@ -20,7 +23,7 @@ String stripDirections(String s) => s
 String cleanTranscript(String s) => s.replaceAll(_speakerMarker, ' ').replaceAll(RegExp(r'\s+'), ' ').trim();
 
 /// Turns a markdown answer into plain speakable text: drops code blocks, tables, links' URLs, emphasis markers,
-/// headings, list bullets, images and raw URLs.
+/// headings, list bullets, images, raw URLs and emoji (small models add them to spoken answers anyway).
 String markdownToSpeech(String md, {bool keepDirections = true}) {
   var s = md;
   s = s.replaceAll(RegExp(r'```[\s\S]*?(```|$)'), ' ');
@@ -36,8 +39,12 @@ String markdownToSpeech(String md, {bool keepDirections = true}) {
   s = s.replaceAllMapped(RegExp(r'`([^`]+)`'), (m) => m[1]!);
   s = s.replaceAll(RegExp(r'(\*\*|__|\*|~~)'), '');
   s = s.replaceAll(RegExp(r'<think>[\s\S]*?</think>'), ' ');
+  s = s.replaceAll(_emoji, '');
   if (!keepDirections) s = stripDirections(s);
-  s = s.replaceAll(RegExp(r'\n{2,}'), '. ').replaceAll('\n', ' ');
+  // A paragraph break ends a sentence, without a second mark after one that is already there ("Ready?. Yes").
+  s = s
+      .replaceAllMapped(RegExp(r'([.!?…؟۔:;،])?[ \t]*\n{2,}'), (m) => m.start == 0 ? '' : (m[1] == null ? '. ' : '${m[1]} '))
+      .replaceAll('\n', ' ');
   s = s.replaceAll(RegExp(r'\s+'), ' ').replaceAll(RegExp(r'(\.\s*){2,}'), '. ');
   return s.trim();
 }
@@ -85,6 +92,21 @@ class SentenceSplitter {
     return _drain(force: true);
   }
 
+  /// Directions that came on their own, waiting for the next sentence.
+  String _lead = '';
+
+  /// A piece that is only directions ("[cheerfully]" on a line by itself) waits for the next sentence: sent alone,
+  /// Drama 3 performs it as a sound of its own (a laugh).
+  void _emit(List<String> out, String speak) {
+    if (!_hasWords.hasMatch(speak)) return;
+    if (!_hasWords.hasMatch(stripDirections(speak))) {
+      _lead = _lead.isEmpty ? speak : '$_lead $speak';
+      return;
+    }
+    out.add(_lead.isEmpty ? speak : '$_lead $speak');
+    _lead = '';
+  }
+
   List<String> _drain({required bool force}) {
     final out = <String>[];
     var s = _buf.toString();
@@ -93,15 +115,13 @@ class SentenceSplitter {
       if (m == null) break;
       final piece = s.substring(0, m.end);
       s = s.substring(m.end);
-      final speak = markdownToSpeech(piece);
-      if (_hasWords.hasMatch(speak)) out.add(speak);
+      _emit(out, markdownToSpeech(piece));
     }
     // First audio as early as possible: the first clause goes out at a comma once it has a few words.
     if (!force && !_started && out.isEmpty) {
       final m = RegExp(r'[,،]\s').allMatches(s).where((m) => m.start >= 24).firstOrNull;
       if (m != null) {
-        final speak = markdownToSpeech(s.substring(0, m.end));
-        if (_hasWords.hasMatch(speak)) out.add(speak);
+        _emit(out, markdownToSpeech(s.substring(0, m.end)));
         s = s.substring(m.end);
       }
     }
@@ -109,13 +129,14 @@ class SentenceSplitter {
     if (!force && s.length > 140) {
       final cut = s.lastIndexOf(' ', 120);
       if (cut > 40) {
-        out.add(markdownToSpeech(s.substring(0, cut)));
+        _emit(out, markdownToSpeech(s.substring(0, cut)));
         s = s.substring(cut + 1);
       }
     }
     if (force) {
-      final speak = markdownToSpeech(s);
-      if (_hasWords.hasMatch(speak)) out.add(speak);
+      _emit(out, markdownToSpeech(s));
+      if (_lead.isNotEmpty) out.add(_lead); // a closing [small laugh] is meant to be heard
+      _lead = '';
       s = '';
     }
     _buf

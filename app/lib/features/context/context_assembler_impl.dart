@@ -17,6 +17,7 @@ import '../../core/providers.dart';
 import '../../data/db/app_db.dart' hide LlmModel, NasDevice;
 import '../memory/memory_extractor.dart';
 import '../memory/memory_repo.dart';
+import '../providers/foreground_gate.dart';
 import '../skills/skills_repo.dart';
 import '../tools/tool_router.dart';
 import '../tools/tool_runtime_impl.dart';
@@ -85,6 +86,7 @@ class NurContextAssembler implements ContextAssembler {
   final _countedUser = <String, String>{}; // chatId -> last user msg id whose memories were counted
   final _extractedUser = <String, String>{};
   final _extracting = <String>{};
+  final _autoCompacting = <String>{};
   final _status = StreamController<String>.broadcast();
 
   AppDb get _db => _ref.read(dbProvider);
@@ -100,8 +102,10 @@ class NurContextAssembler implements ContextAssembler {
 
   @override
   Future<AssembledContext> build({required String chatId, required LlmModel model}) async {
+    // A summary the user asked for is waited for. An automatic one waits for the model itself (foreground_gate.dart):
+    // waiting for it here would hold up the reply that holds the model.
     final pending = _compacting[chatId];
-    if (pending != null) {
+    if (pending != null && !_autoCompacting.contains(chatId)) {
       try {
         await pending.timeout(const Duration(minutes: 3));
       } catch (_) {}
@@ -284,7 +288,8 @@ class NurContextAssembler implements ContextAssembler {
         case 'assistant':
           history.add(LlmMessage(LlmRole.assistant, m.content, toolCalls: parseToolCalls(m.toolCallsJson), reasoning: m.reasoning));
         case 'tool':
-          history.add(LlmMessage(LlmRole.tool, toolResultText(m), toolCallId: m.toolCallId, toolName: m.toolName));
+          history.add(LlmMessage(LlmRole.tool, toolResultText(m),
+              toolCallId: m.toolCallId, toolName: m.toolName, isError: m.status == 'error'));
       }
     }
     out.addAll(pairToolMessages(history));
@@ -417,9 +422,11 @@ class NurContextAssembler implements ContextAssembler {
 
 
   @override
-  Future<void> afterTurn({required String chatId, required LlmModel model}) async {
+  Future<void> afterTurn({required String chatId, required LlmModel model}) =>
+      Future.wait([_maybeExtract(chatId, model), _maybeAutoCompact(chatId, model)]);
+
+  Future<void> _maybeAutoCompact(String chatId, LlmModel model) async {
     try {
-      unawaited(_maybeExtract(chatId, model));
       final db = _db;
       if (!await db.boolSetting(IntelKeys.autoCompact)) return;
       if (_compacting.containsKey(chatId)) return;
@@ -433,35 +440,58 @@ class NurContextAssembler implements ContextAssembler {
       final reported = snap.info.reportedPromptTokens ?? 0;
       final used = math.max(b.used, reported);
       if (used / b.contextWindow < threshold) return;
-      unawaited(_startCompaction(chatId, model, auto: true).catchError((_) {}));
+      await _startCompaction(chatId, model, auto: true).catchError((_) {});
     } catch (e) {
-      debugPrint('afterTurn failed: $e');
+      debugPrint('auto compaction check failed: $e');
     }
   }
 
   Future<void> _maybeExtract(String chatId, LlmModel model) async {
-    if (_extracting.contains(chatId)) return;
+    if (!_extracting.add(chatId)) return;
+    final before = _extractedUser[chatId];
     try {
       final db = _db;
       if (!await db.boolSetting(IntelKeys.memoryEnabled) || !await db.boolSetting(IntelKeys.memoryAutoExtract)) return;
-      final chat = await (db.select(db.chats)..where((c) => c.id.equals(chatId))).getSingleOrNull();
-      if (chat == null) return;
-      final all = await (db.select(db.messages)..where((m) => m.chatId.equals(chatId))).get();
-      final path = activePath(all, chat.activeLeafId).where((m) => !isMarker(m)).toList();
+      // The turn that asked for this run; while a voice call holds the model, more turns can follow before it runs.
+      final first = (await _activePath(chatId))?.where((m) => m.role == 'user').lastOrNull?.id;
+      await _ref.read(foregroundGateProvider).whenFree();
+      final path = await _activePath(chatId);
+      if (path == null) return;
       final ui = path.lastIndexWhere((m) => m.role == 'user');
       if (ui < 0) return;
       final user = path[ui];
-      if (_extractedUser[chatId] == user.id) return;
-      final reply = path.skip(ui + 1).where((m) => m.role == 'assistant' && m.content.trim().isNotEmpty).map((m) => m.content).join('\n');
+      if (before == user.id) return;
       if (path.skip(ui + 1).any((m) => m.status == 'streaming')) return;
-      _extracting.add(chatId);
+      final reply = path.skip(ui + 1).where((m) => m.role == 'assistant' && m.content.trim().isNotEmpty).map((m) => m.content).join('\n');
+      // Every user message not looked at yet: after the last extracted one, else from the turn that started this run.
+      final last = before == null ? -1 : path.indexWhere((m) => m.id == before);
+      final firstAt = first == null ? -1 : path.indexWhere((m) => m.id == first);
+      final start = last >= 0 ? last + 1 : (firstAt >= 0 && firstAt < ui ? firstAt : ui);
+      final users = [for (final m in path.sublist(start, ui + 1)) if (m.role == 'user') m.content];
       _extractedUser[chatId] = user.id;
-      await _ref.read(memoryExtractorProvider).extract(model: model, userText: user.content, assistantText: reply, chatId: chatId);
+      await _ref.read(memoryExtractorProvider).extract(
+          model: model, userText: users.skip(math.max(0, users.length - 6)).join('\n'), assistantText: reply, chatId: chatId);
+    } on BackgroundCancelled {
+      // A reply needed the model: these messages are looked at again after the next turn.
+      if (before == null) {
+        _extractedUser.remove(chatId);
+      } else {
+        _extractedUser[chatId] = before;
+      }
     } catch (e) {
       debugPrint('memory extraction failed: $e');
     } finally {
       _extracting.remove(chatId);
     }
+  }
+
+  /// The visible branch of a chat without markers, or null when the chat does not exist.
+  Future<List<Message>?> _activePath(String chatId) async {
+    final db = _db;
+    final chat = await (db.select(db.chats)..where((c) => c.id.equals(chatId))).getSingleOrNull();
+    if (chat == null) return null;
+    final all = await (db.select(db.messages)..where((m) => m.chatId.equals(chatId))).get();
+    return activePath(all, chat.activeLeafId).where((m) => !isMarker(m)).toList();
   }
 
 
@@ -473,17 +503,25 @@ class NurContextAssembler implements ContextAssembler {
     if (existing != null) return existing;
     final f = _compact(chatId, model, auto: auto);
     _compacting[chatId] = f;
+    if (auto) _autoCompacting.add(chatId);
     _lastError.remove(chatId);
     _notify(chatId);
     return f.then((_) {
       _cooldownUntil.remove(chatId);
     }, onError: (Object e) {
+      // Too little conversation, or a reply that needed the model, is not a failure: no error note and no cooldown,
+      // so the next turn can compact.
+      if (e is _NothingToCompact || e is BackgroundCancelled) {
+        if (!auto) throw e;
+        return;
+      }
       final msg = e is StateError ? e.message : e.toString();
       _lastError[chatId] = msg;
       _cooldownUntil[chatId] = DateTime.now().add(const Duration(minutes: 5));
       if (!auto) throw e;
     }).whenComplete(() {
       _compacting.remove(chatId);
+      _autoCompacting.remove(chatId);
       _notify(chatId);
     });
   }
@@ -498,7 +536,7 @@ class NurContextAssembler implements ContextAssembler {
     final view = resolveContext(path, all);
     final msgs = view.messages;
     final starts = turnStarts(msgs);
-    if (starts.length < 2) throw StateError('Not enough conversation to compact yet.');
+    if (starts.length < 2) throw _NothingToCompact();
     final window = _window(model, await db.intSetting(IntelKeys.fallbackWindow, 8192));
 
     // Keep up to the last 4 turns, fewer when they alone would fill more than half the window.
@@ -510,26 +548,27 @@ class NurContextAssembler implements ContextAssembler {
     }
     final cut = starts[starts.length - keep];
     final covered = msgs.sublist(0, cut);
-    if (covered.isEmpty) throw StateError('Not enough conversation to compact yet.');
+    if (covered.isEmpty) throw _NothingToCompact();
 
     final prev = view.summary?.content.trim();
     final lines = [
       for (final m in covered)
         (m.role, m.content, m.toolCallsJson, m.role == 'tool' ? toolResultText(m) : null, m.toolName),
     ];
-    final chunkTokens = math.max(1500, (window * 0.6).round() - 1500);
+    final maxTokens = (window * 0.12).round().clamp(400, 1500);
+    // Each summary request (transcript chunk, prompt, summary) has to fit the window, also a small one.
+    final chunkTokens = math.min(math.max(1500, (window * 0.6).round() - 1500), math.max(300, window - maxTokens - 600));
     final (chunks, arabicShare) = await _chunksAsync(lines, chunkTokens);
     final lang = arabicShare > 0.3
         ? 'Write the summary in Arabic (the conversation is mainly in Arabic).'
         : 'Write the summary in the main language of the conversation.';
-    final maxTokens = (window * 0.12).round().clamp(400, 1500);
     var summary = prev ?? '';
     for (final (i, chunk) in chunks.indexed) {
       final user = StringBuffer();
       if (summary.isNotEmpty) user.write('EXISTING SUMMARY of even earlier messages (merge it in, keep what still matters):\n$summary\n\n');
       user.write('CONVERSATION${chunks.length > 1 ? ' (part ${i + 1}/${chunks.length})' : ''}:\n$chunk\n\n$lang Produce the updated summary now.');
       summary = await _llm.complete(model, [LlmMessage(LlmRole.system, summarizerSystem), LlmMessage(LlmRole.user, user.toString())],
-          temperature: 0.2, maxTokens: maxTokens, timeout: const Duration(minutes: 5));
+          temperature: 0.2, maxTokens: maxTokens, timeout: const Duration(minutes: 5), background: auto);
       if (summary.trim().isEmpty) throw StateError('The model returned an empty summary.');
     }
 
@@ -594,6 +633,10 @@ class NurContextAssembler implements ContextAssembler {
     await _moveLeafIfIdle(chatId, chat.activeLeafId ?? anchor.id, id);
     _notify(chatId);
   }
+}
+
+class _NothingToCompact extends StateError {
+  _NothingToCompact() : super('Not enough conversation to compact yet.');
 }
 
 final _noMsg = Message(

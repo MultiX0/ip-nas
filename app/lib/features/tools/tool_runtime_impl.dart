@@ -10,6 +10,7 @@ import '../../core/contracts/llm.dart';
 import '../../core/providers.dart';
 import '../context/intel_settings.dart';
 import '../mcp/mcp_client.dart';
+import '../nas/nas_hub_client.dart' show NasException;
 import '../mcp/mcp_manager.dart';
 import '../skills/skills_repo.dart';
 import 'builtin_tools.dart';
@@ -121,7 +122,11 @@ class NurToolRuntime implements ToolRuntime {
       return ToolResult('Unknown tool "${call.name}".', isError: true);
     }
     if (builtin != null && (await disabledBuiltinTools(_ref)).contains(builtin.name)) {
-      return ToolResult('The tool "${call.name}" is turned off in Settings > Tools.', isError: true);
+      return ToolResult('The tool "${call.name}" is turned off in Settings > Tools.', isError: true, unavailable: true);
+    }
+    // The engine also calls memory_save itself ("remember that ..."), so the switch is checked here too.
+    if (builtin != null && builtin.group == 'memory' && !await _ref.read(dbProvider).boolSetting(IntelKeys.memoryEnabled)) {
+      return const ToolResult('Memory is turned off in Settings > Memory, so nothing was saved or read.', isError: true, unavailable: true);
     }
     final risk = builtin != null ? builtin.risk(args, _lastExecMode) : ToolRisk.needsApproval;
     if (risk != ToolRisk.safe) {
@@ -131,7 +136,7 @@ class NurToolRuntime implements ToolRuntime {
       } catch (_) {
         ok = false;
       }
-      if (!ok) return const ToolResult('The user declined to run this tool. Do not retry it; ask how to proceed.', isError: true);
+      if (!ok) return ToolResult.declined;
     }
     try {
       ToolResult r;
@@ -144,11 +149,14 @@ class NurToolRuntime implements ToolRuntime {
       final content = await formatAndTruncate(r.content, max);
       return ToolResult(content, isError: r.isError, display: r.display);
     } on TimeoutException {
-      return ToolResult('The tool "${call.name}" timed out.', isError: true);
+      final nas = builtin?.group == 'nas';
+      return ToolResult(nas ? 'The NAS did not answer in time.' : 'The tool "${call.name}" timed out.', isError: true, unavailable: true);
     } on NasNotConnected catch (e) {
-      return ToolResult(e.toString(), isError: true);
+      return ToolResult(e.toString(), isError: true, unavailable: true);
+    } on NasException catch (e) {
+      return ToolResult('Tool failed: ${e.message}', isError: true, unavailable: _unreachable(e.statusCode));
     } on DioException catch (e) {
-      return ToolResult(nasErrorText(e), isError: true);
+      return ToolResult(nasErrorText(e), isError: true, unavailable: _unreachable(e.response?.statusCode));
     } on McpException catch (e) {
       return ToolResult('MCP server error: ${e.message}', isError: true);
     } catch (e) {
@@ -157,6 +165,10 @@ class NurToolRuntime implements ToolRuntime {
     }
   }
 }
+
+/// No answer, not allowed, or a server-side failure: the NAS cannot do it right now. Other client errors (400, 404)
+/// can come from wrong arguments, which the model may fix.
+bool _unreachable(int? status) => status == null || status == 401 || status == 403 || status >= 500;
 
 final nurToolRuntimeProvider = Provider<NurToolRuntime>((ref) {
   final rt = NurToolRuntime(ref);

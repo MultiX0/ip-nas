@@ -75,10 +75,11 @@ class AsrResult {
 }
 
 class FishAudio {
-  FishAudio(this.apiKey)
+  /// [baseUrl] and [liveUrl] only change in tests, which point them at a local server.
+  FishAudio(this.apiKey, {String baseUrl = fishBaseUrl, this.liveUrl = fishLiveUrl, this.asrTimeout = const Duration(seconds: 30)})
     : _dio = Dio(
         BaseOptions(
-          baseUrl: fishBaseUrl,
+          baseUrl: baseUrl,
           connectTimeout: const Duration(seconds: 10),
           receiveTimeout: const Duration(seconds: 90),
           headers: {'Authorization': 'Bearer $apiKey'},
@@ -86,6 +87,8 @@ class FishAudio {
       );
 
   final String apiKey;
+  final String liveUrl;
+  final Duration asrTimeout;
   final Dio _dio;
 
   void close() => _dio.close(force: true);
@@ -193,8 +196,11 @@ class FishAudio {
       await for (final chunk in r.data!.stream) {
         yield chunk;
       }
-    } catch (e) {
+    } on DioException catch (e) {
       throw _wrap(e);
+    } catch (_) {
+      // The socket closed in the middle of the audio (dart:io reports it as a raw HttpException).
+      throw FishException('The connection to Fish Audio dropped. Check your internet connection.');
     }
   }
 
@@ -213,10 +219,12 @@ class FishAudio {
         'ignore_timestamps': 'true',
         if (model == 'transcribe-1-pro') 'tag_audio_events': 'false',
       });
+      // A transcript comes back in a second or two; on a stalled network, give up after [asrTimeout] instead of the
+      // client's 90 s so a call does not sit in "thinking".
       final r = await _dio.post(
         '/v1/asr',
         data: form,
-        options: Options(headers: {'model': model}),
+        options: Options(headers: {'model': model}, sendTimeout: asrTimeout, receiveTimeout: asrTimeout),
         cancelToken: cancel,
       );
       final m = r.data is Map ? r.data as Map : const {};
@@ -228,6 +236,7 @@ class FishAudio {
 
   /// Opens a live (WebSocket) Drama 3 TTS session that turns streamed text into streamed PCM audio.
   Future<FishLiveTts> openLive({String? voiceId, String model = 'drama-3', String latency = 'balanced', double speed = 1.0}) => FishLiveTts.connect(
+    url: liveUrl,
     apiKey: apiKey,
     model: model,
     request: _ttsRequest('', voiceId: voiceId, latency: latency, speed: speed),
@@ -243,6 +252,7 @@ class FishLiveTts {
   final _audio = StreamController<Uint8List>();
   final _done = Completer<void>();
   bool _closed = false;
+  bool _stopSent = false;
   StreamSubscription<dynamic>? _sub;
 
   Stream<Uint8List> get audio => _audio.stream;
@@ -251,10 +261,18 @@ class FishLiveTts {
   Future<void> get done => _done.future;
   bool get isClosed => _closed;
 
-  static Future<FishLiveTts> connect({required String apiKey, required String model, required Map<String, dynamic> request}) async {
+  /// [pingInterval]: Fish answers pings, so a dead network shows up within two intervals instead of never.
+  static Future<FishLiveTts> connect({
+    String url = fishLiveUrl,
+    required String apiKey,
+    required String model,
+    required Map<String, dynamic> request,
+    Duration pingInterval = const Duration(seconds: 10),
+  }) async {
     final ch = IOWebSocketChannel.connect(
-      Uri.parse(fishLiveUrl),
+      Uri.parse(url),
       headers: {'Authorization': 'Bearer $apiKey', 'model': model},
+      pingInterval: pingInterval,
       connectTimeout: const Duration(seconds: 10),
     );
     try {
@@ -316,6 +334,9 @@ class FishLiveTts {
         final code = _ch.closeCode;
         if (!_done.isCompleted && code != null && code >= 4000) {
           _fail(FishException(FishException.messageFor(code == 4001 ? 401 : (code == 4002 ? 402 : null), _ch.closeReason)));
+        } else if (!_done.isCompleted && !_stopSent) {
+          // Closed before we said stop: unanswered pings (the network went away) or the server dropped the session.
+          _fail(FishException('The connection to Fish Audio dropped. Check your internet connection.'));
         } else {
           _finish();
         }
@@ -338,7 +359,10 @@ class FishLiveTts {
   void flush() => _send({'event': 'flush'});
 
   /// No more text: the server finishes buffered audio, sends `finish` and closes.
-  void stop() => _send({'event': 'stop'});
+  void stop() {
+    _stopSent = true;
+    _send({'event': 'stop'});
+  }
 
   void _finish() {
     if (!_done.isCompleted) _done.complete();

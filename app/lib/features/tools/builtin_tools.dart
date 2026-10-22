@@ -75,6 +75,7 @@ final List<BuiltinTool> builtinTools = [
         'its numbers exactly. Never guess system values.',
     parameters: _obj({}),
     risk: _safe,
+    timeout: const Duration(seconds: 20),
     run: (a, c) async {
       final s = await c.nas.system();
       final values = systemValues(s);
@@ -88,6 +89,7 @@ final List<BuiltinTool> builtinTools = [
     description: 'List the Docker containers (apps) on the NAS with name, image, state, status, CPU, memory and ports.',
     parameters: _obj({}),
     risk: _safe,
+    timeout: const Duration(seconds: 20),
     run: (a, c) async {
       final list = await c.nas.containers();
       if (list.isEmpty) return const ToolResult('No containers on the NAS.');
@@ -126,6 +128,7 @@ final List<BuiltinTool> builtinTools = [
       'tail': {'type': 'integer', 'description': 'Number of lines from the end (default 100, max 1000)'},
     }, ['name']),
     risk: _safe,
+    timeout: const Duration(seconds: 30),
     run: (a, c) async {
       final name = _str(a, 'name');
       if (name.isEmpty) return const ToolResult('Missing container name.', isError: true);
@@ -153,6 +156,7 @@ final List<BuiltinTool> builtinTools = [
       'limit': {'type': 'integer', 'description': 'Number of results (1-10, default 5)'},
     }, ['query']),
     risk: _safe,
+    timeout: const Duration(seconds: 30),
     run: (a, c) async {
       final q = _str(a, 'query');
       if (q.isEmpty) return const ToolResult('Missing query.', isError: true);

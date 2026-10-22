@@ -9,6 +9,7 @@
 import 'dart:async';
 import 'dart:io';
 import 'dart:math' as math;
+import 'dart:typed_data';
 
 import 'package:dio/dio.dart' show CancelToken;
 import 'package:flutter/foundation.dart';
@@ -16,6 +17,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../../core/contracts/chat_engine.dart';
 import '../../core/utils/text_dir.dart';
+import '../providers/foreground_gate.dart';
 import 'audio_engine.dart';
 import 'call_view_model.dart';
 import 'fish_audio.dart';
@@ -27,12 +29,34 @@ export 'call_view_model.dart' show CallPhase, ToolKind;
 
 enum _Reveal { all, live, frozen }
 
+const noAnswerMessage = 'Nur had no answer this time. Try asking again.';
+
+/// What Nur says when an answer breaks off (the model or the NAS failed in the middle).
+String failureLine({required bool arabic, bool direction = false}) =>
+    '${direction ? '[apologetic] ' : ''}${arabic ? 'آسف، صار عندي خلل. اسألني مرة ثانية.' : 'Sorry, something went wrong on my side. Please ask me again.'}';
+
 class VoiceCallController extends ChangeNotifier implements CallViewModel {
-  VoiceCallController({required this.engine, required this.fish, required this.prefs, this.chatId});
+  /// [gate]: held from [start] to [end], so the NAS model spends the call on answers and not on chat titles or
+  /// memory extraction.
+  VoiceCallController({
+    required this.engine,
+    required this.fish,
+    required this.prefs,
+    this.chatId,
+    this.gate,
+    CallAudio audio = const CallAudio(),
+    VoiceFillers? fillers,
+  }) : _audio = audio,
+       _mic = audio.mic(),
+       _fillers = fillers ?? VoiceFillers(fish);
 
   final ChatEngine engine;
   final FishAudio fish;
-  late final VoiceFillers _fillers = VoiceFillers(fish);
+  final ForegroundGate? gate;
+  ForegroundLease? _lease;
+  final CallAudio _audio;
+  final MicStream _mic;
+  final VoiceFillers _fillers;
 
   /// Read at the start of every turn so voice changes during the call apply to the next answer.
   final VoicePrefs Function() prefs;
@@ -61,7 +85,6 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
   @override
   int? lastTtfaMs;
 
-  final _mic = MicStream();
   final _vad = EnergyVad();
   StreamSubscription<Uint8List>? _micSub;
   double _micLevel = 0;
@@ -69,6 +92,18 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
   int _turn = 0;
   bool _replyRunning = false;
   StreamSubscription<ReplyEvent>? _replySub;
+
+  /// Audio of the question in flight until its text goes to the chat engine, and the words of a question cut short
+  /// by a pause, waiting for the rest.
+  Uint8List? _pending, _carry;
+
+  /// The text of the question in flight once it went to the chat engine, and the same for a question the user went
+  /// on with before Nur answered.
+  String? _sentText, _carryText;
+
+  /// Open while the chat engine is still sending the last reply. A reply cut off by barge-in keeps running for a
+  /// moment, and the engine refuses a new message in the same chat until it has finished.
+  Completer<void>? _replyClosed;
   FishLiveTts? _tts;
   PcmStreamPlayer? _player;
   CancelToken? _asrCancel;
@@ -76,17 +111,20 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
   Timer? _notifyTimer;
   bool _disposed = false;
   bool _ending = false;
+  bool _paused = false;
 
   // Warm TTS socket for the next turn.
   Future<FishLiveTts>? _warm;
   String? _warmKey;
   int _rewarms = 0;
 
-  // Caption reveal.
+  // Caption reveal. A filler can play before the reply; its audio does not count towards the words shown.
   _Reveal _reveal = _Reveal.all;
   int _captionWords = 0;
   int _revealMax = 0;
   PcmStreamPlayer? _revealPlayer;
+  bool _replyAudio = false;
+  double _revealOffsetMs = 0;
   bool _ttsDone = false;
   double _msPerWordGuess = 360;
 
@@ -95,9 +133,12 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
   int? _tAsr, _tToken;
 
   @override
-  double get micLevel => muted ? 0 : _micLevel;
+  double get micLevel => muted || _paused ? 0 : _micLevel;
   @override
   double get outLevel => _player?.level ?? 0;
+
+  /// True while the app is in the background: the mic is off until [resume].
+  bool get paused => _paused;
 
   @override
   int get revealedWords {
@@ -109,10 +150,13 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
       case _Reveal.live:
         final pl = _revealPlayer;
         if (pl == null) return math.min(_revealMax, _captionWords);
-        final played = pl.playedMs;
+        if (!_replyAudio) return 0;
+        final played = pl.playedMs - _revealOffsetMs;
         if (played <= 0) return 0;
         // Once the whole reply is synthesised, the real pace is known.
-        final perWord = (_ttsDone && pl.ended && _captionWords > 0) ? math.max(120.0, pl.queuedMs / _captionWords) : _msPerWordGuess;
+        final perWord = (_ttsDone && pl.ended && _captionWords > 0)
+            ? math.max(120.0, (pl.queuedMs - _revealOffsetMs) / _captionWords)
+            : _msPerWordGuess;
         final n = math.min(_captionWords, (played / perWord).ceil());
         if (n > _revealMax) _revealMax = n;
         return _revealMax;
@@ -148,10 +192,15 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
     if (kDebugMode) debugPrint('[voice] $m');
   }
 
+  /// Starts the call; also the retry after an error.
   Future<void> start() async {
+    if (_disposed || _ending) return;
+    _lease ??= gate?.hold();
     error = null;
     errorNeedsSettings = false;
     errorNeedsPermission = false;
+    await _stopMic();
+    _vad.reset();
     _setPhase(CallPhase.connecting);
     final clock = Stopwatch()..start();
     // Open the first TTS socket right away, in parallel with permission + key checks.
@@ -177,10 +226,14 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
         errorNeedsPermission = true;
         throw FishException('Nur cannot use the microphone. Allow microphone access in your system settings.');
       }
-      await Future.wait([fish.validateKey(), AudioEngine.ensure()]);
-      final stream = await _mic.start();
-      _micSub = stream.listen(_onMic, onError: (Object e) => _fail('The microphone stopped: $e'));
-      if (_disposed) return;
+      await Future.wait([fish.validateKey(), _audio.ready()]);
+      // The call may have been closed while the key was checked: never open the mic for a call that is gone.
+      if (_disposed || _ending) return;
+      if (!_paused) await _startMic();
+      if (_disposed || _ending) {
+        await _stopMic();
+        return;
+      }
       _log('call ready in ${clock.elapsedMilliseconds} ms');
       _setPhase(CallPhase.listening);
     } on FishException catch (e) {
@@ -193,6 +246,47 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
     }
   }
 
+  Future<void> _startMic() async {
+    final stream = await _mic.start();
+    _micSub = stream.listen(_onMic, onError: (Object e) => _fail('The microphone stopped: $e'));
+  }
+
+  Future<void> _stopMic() async {
+    final sub = _micSub;
+    if (sub == null) return;
+    _micSub = null;
+    await sub.cancel();
+    await _mic.stop();
+  }
+
+  /// The app went to the background: the mic goes off and the warm socket is let go. A reply that is playing ends
+  /// normally.
+  Future<void> pause() async {
+    if (_paused || _disposed || _ending || phase == CallPhase.ended) return;
+    _paused = true;
+    _vad.reset();
+    _micLevel = 0;
+    _dropWarm();
+    await _stopMic();
+    _notify(now: true);
+  }
+
+  /// Back in the foreground: the mic comes back and the next answer gets a warm socket again.
+  Future<void> resume() async {
+    if (!_paused || _disposed || _ending) return;
+    _paused = false;
+    if (error == null && phase != CallPhase.connecting && phase != CallPhase.ended && _micSub == null) {
+      try {
+        await _startMic();
+      } catch (e) {
+        _fail('The microphone did not come back: $e');
+        return;
+      }
+    }
+    if (phase == CallPhase.listening) _warmUp();
+    _notify(now: true);
+  }
+
   void _fail(String message) {
     error = message;
     _notify(now: true);
@@ -201,7 +295,7 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
   String _ttsKey(VoicePrefs p) => '${p.voiceId}|${p.model}|${p.latency}|${p.speed}';
 
   void _warmUp() {
-    if (_disposed || _ending || phase == CallPhase.ended || _warm != null) return;
+    if (_disposed || _ending || _paused || phase == CallPhase.ended || _warm != null) return;
     final p = prefs();
     final f = fish.openLive(voiceId: p.voiceId, model: p.model, latency: p.latency, speed: p.speed);
     f.ignore();
@@ -215,7 +309,7 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
         s.done.whenComplete(() {
           if (!identical(_warm, f)) return;
           _warm = null;
-          if (age.elapsed > const Duration(seconds: 8) && _rewarms < 30 && !_disposed) {
+          if (age.elapsed > const Duration(seconds: 8) && _rewarms < 30) {
             _rewarms++;
             _warmUp();
           }
@@ -251,7 +345,7 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
 
   /// An unused turn socket goes back to being the warm one.
   void _putBack(Future<FishLiveTts> f, String key) {
-    if (_warm == null && !_disposed && !_ending && phase != CallPhase.ended) {
+    if (_warm == null && !_disposed && !_ending && !_paused && phase != CallPhase.ended) {
       _warm = f;
       _warmKey = key;
     } else {
@@ -272,15 +366,23 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
       _micLevel = 0;
       return;
     }
-    _vad.playbackActive = phase == CallPhase.speaking;
+    // Nur's own voice (a filler while thinking, or the answer) reaches the mic too; without echo cancellation it
+    // would otherwise interrupt Nur.
+    _vad
+      ..playbackActive = phase == CallPhase.speaking || (_player?.playing ?? false)
+      ..playbackRms = _player?.rms ?? 0;
     final events = _vad.add(chunk);
     _micLevel = _micLevel * 0.6 + levelFromRms(_vad.lastRms) * 0.4;
     for (final ev in events) {
       if (ev == VadEvent.speechStart) {
-        if (phase == CallPhase.speaking || phase == CallPhase.thinking) _bargeIn();
+        if (phase == CallPhase.speaking || phase == CallPhase.thinking) _bargeIn(keepWords: true);
       } else {
-        final pcm = _vad.takeUtterance();
-        if (pcm != null) {
+        final heard = _vad.takeUtterance();
+        final carry = _carry;
+        _carry = null;
+        final pcm = carry == null || heard == null ? (heard ?? carry) : _join(carry, heard);
+        // Nothing usable heard (a short noise cut in), but a question that was already sent waits: ask it again.
+        if (pcm != null || _carryText != null) {
           _turnClock = Stopwatch()..start();
           _tAsr = null;
           _tToken = null;
@@ -290,19 +392,35 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
     }
   }
 
-  /// Stops speech and the running reply right away.
-  void _bargeIn() {
+  void _stopEngine() {
+    final id = chatId;
+    if (id == null) return;
+    try {
+      engine.stop(id);
+    } catch (_) {}
+  }
+
+  static Uint8List _join(Uint8List a, Uint8List b) =>
+      (BytesBuilder(copy: false)
+            ..add(a)
+            ..add(Uint8List(MicStream.sampleRate * 2 ~/ 5)) // 200 ms of silence between the parts
+            ..add(b))
+          .takeBytes();
+
+  /// Stops speech and the running reply right away. [keepWords]: the user went on talking before Nur answered (a pause
+  /// in the middle of a sentence, or a noise), so what they said so far goes out again together with the rest.
+  void _bargeIn({bool keepWords = false}) {
+    if (keepWords && phase == CallPhase.thinking && !_replyAudio) {
+      _carry = _pending;
+      if (_sentText != null) _carryText = _sentText;
+    }
+    _pending = null;
+    _sentText = null;
     _turn++;
     _asrCancel?.cancel();
     _asrCancel = null;
-    if (_replyRunning && chatId != null) {
-      try {
-        engine.stop(chatId!);
-      } catch (_) {}
-    }
+    if (_replyRunning) _stopEngine();
     _replyRunning = false;
-    unawaited(_replySub?.cancel());
-    _replySub = null;
     _tts?.cancel();
     _tts = null;
     if (_reveal == _Reveal.live) {
@@ -325,8 +443,11 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
     if (phase == CallPhase.speaking || phase == CallPhase.thinking) _bargeIn();
   }
 
-  Future<void> _handleUtterance(Uint8List pcm) async {
+  Future<void> _handleUtterance(Uint8List? pcm) async {
     final turn = ++_turn;
+    _pending = pcm;
+    _sentText = null;
+    _replyAudio = false;
     final p = prefs();
     final key = _ttsKey(p);
     _setPhase(CallPhase.thinking);
@@ -336,17 +457,22 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
     // The warm socket (or a fresh one opened while ASR runs).
     final ttsFuture = _takeTts(p);
     ttsFuture.ignore();
-    String text;
+    var text = '';
     try {
-      final wav = await encodeWav(pcm, MicStream.sampleRate);
-      _asrCancel = CancelToken();
-      final r = await fish.transcribe(wav, language: p.sttLanguage, model: p.sttModel, cancel: _asrCancel);
-      text = cleanTranscript(r.text);
+      if (pcm != null) {
+        final wav = await encodeWav(pcm, MicStream.sampleRate);
+        if (turn != _turn) throw FishException('Cancelled.');
+        _asrCancel = CancelToken();
+        final r = await fish.transcribe(wav, language: p.sttLanguage, model: p.sttModel, cancel: _asrCancel);
+        text = cleanTranscript(r.text);
+      }
       _tAsr = _turnClock?.elapsedMilliseconds;
     } catch (e) {
       _putBack(ttsFuture, key);
       if (turn != _turn) return;
       if (e is FishException && e.message == 'Cancelled.') return;
+      _pending = null;
+      _carryText = null;
       status = '$e';
       _setPhase(CallPhase.listening);
       return;
@@ -355,7 +481,11 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
       _putBack(ttsFuture, key);
       return;
     }
+    final carried = _carryText;
+    _carryText = null;
+    if (carried != null) text = text.isEmpty ? carried : '$carried $text';
     if (text.isEmpty) {
+      _pending = null;
       _putBack(ttsFuture, key);
       _setPhase(CallPhase.listening);
       return;
@@ -366,6 +496,8 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
     _reveal = _Reveal.live;
     _revealMax = 0;
     _revealPlayer = null;
+    _replyAudio = false;
+    _revealOffsetMs = 0;
     _ttsDone = false;
     _notify(now: true);
     await _runReply(text, ttsFuture, turn, p);
@@ -383,7 +515,7 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
   }
 
   Future<void> _runReply(String text, Future<FishLiveTts> ttsFuture, int turn, VoicePrefs p) async {
-    final player = PcmStreamPlayer(
+    final player = _audio.player(
       onStarted: () {
         if (turn == _turn) _logTtfa(turn);
       },
@@ -413,13 +545,15 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
     tts?.audio.listen(
       (chunk) {
         if (turn != _turn) return;
-        player.add(chunk);
         if (!gotAudio) {
           gotAudio = true;
+          _revealOffsetMs = player.queuedMs;
+          _replyAudio = true;
           tool = null;
           toolKind = null;
           _setPhase(CallPhase.speaking);
         }
+        player.add(chunk);
       },
       onError: (Object e) {
         if (turn == _turn) {
@@ -454,16 +588,56 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
       if (!fillerPlayed && _assistantRaw.isEmpty) playFiller(FillerKind.thinking);
     });
 
+    // Hold the question until 600 ms after the end of speech: someone who only paused mid-sentence and goes on
+    // talking in that time gets one question (the barge-in carries this part over) instead of two.
+    final settle = 600 - (_turnClock?.elapsedMilliseconds ?? 600);
+    if (settle > 0) await Future<void>.delayed(Duration(milliseconds: settle));
+    final previous = _replyClosed;
+    if (previous != null && !previous.isCompleted) {
+      _stopEngine();
+      await previous.future.timeout(const Duration(seconds: 10), onTimeout: () {});
+    }
+    if (turn != _turn) {
+      fillerTimer.cancel();
+      tts?.cancel();
+      unawaited(player.stop());
+      return;
+    }
+    final closed = _replyClosed = Completer<void>();
+
     final splitter = SentenceSplitter();
     final replyDone = Completer<void>();
+    final spoken = StringBuffer();
+    var failed = false;
     _replyRunning = true;
     void speak(List<String> sentences) {
       for (final s in sentences) {
+        spoken.write('$s ');
         tts?.text('$s ');
         tts?.flush();
       }
     }
 
+    void finish() {
+      fillerTimer.cancel();
+      if (!failed) speak(splitter.close());
+      tts?.stop();
+      if (!replyDone.isCompleted) replyDone.complete();
+    }
+
+    // An answer that breaks off ends with a short line instead of half a sentence.
+    void fail(String message) {
+      if (failed) return;
+      failed = true;
+      status = message;
+      speak([failureLine(arabic: arabicTurn, direction: p.direction)]);
+      _setCaption(markdownToSpeech(spoken.toString(), keepDirections: false));
+      finish();
+      _notify(now: true);
+    }
+
+    _pending = null;
+    _sentText = text;
     Stream<ReplyEvent> replies;
     try {
       replies = engine.send(chatId, UserInput(text, fromVoiceCall: true), onChatId: (id) => chatId = id);
@@ -492,35 +666,29 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
             tool = toolCaptionFor(k);
             _notify(now: true);
           case ReplyDone(:final fullText):
-            if (_assistantRaw.isEmpty && fullText.isNotEmpty) {
+            if (!failed && _assistantRaw.isEmpty && fullText.isNotEmpty) {
               _assistantRaw = fullText;
               _setCaption(markdownToSpeech(fullText, keepDirections: false));
               speak(splitter.add(fullText));
             }
-            fillerTimer.cancel();
-            speak(splitter.close());
-            tts?.stop();
-            if (!replyDone.isCompleted) replyDone.complete();
-            // Prepare the next turn while Nur speaks and the user answers: the Pi pre-reads the whole history now,
-            // so the next reply starts in ~1-3 s instead of re-reading everything.
-            unawaited(engine.prewarm(chatId, fromVoiceCall: true).catchError((Object _) {}));
-          case ReplyError(:final message):
-            status = message;
-            speak(splitter.close());
-            tts?.stop();
+            if (!failed && status == null && assistantCaption.isEmpty) status = noAnswerMessage;
+            finish();
             _notify(now: true);
-            if (!replyDone.isCompleted) replyDone.complete();
+          case ReplyError(:final message):
+            fail(message);
         }
       },
       onError: (Object e) {
-        if (turn == _turn) status = 'The reply failed: $e';
-        tts?.stop();
-        if (!replyDone.isCompleted) replyDone.complete();
+        if (turn == _turn) {
+          fail('The reply failed: $e');
+        } else {
+          finish();
+        }
+        if (!closed.isCompleted) closed.complete();
       },
       onDone: () {
-        speak(splitter.close());
-        tts?.stop();
-        if (!replyDone.isCompleted) replyDone.complete();
+        finish();
+        if (!closed.isCompleted) closed.complete();
       },
     );
 
@@ -549,13 +717,15 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
   }
 
   Future<void> end() async {
+    _lease?.release();
     if (phase == CallPhase.ended) return;
     _ending = true;
     _bargeIn();
     _dropWarm();
     phase = CallPhase.ended;
-    await _micSub?.cancel();
-    _micSub = null;
+    unawaited(_replySub?.cancel());
+    _replySub = null;
+    await _stopMic();
     await _mic.dispose();
   }
 
