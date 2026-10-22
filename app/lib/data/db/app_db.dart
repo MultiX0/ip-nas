@@ -3,6 +3,8 @@
 import 'package:drift/drift.dart';
 import 'package:drift_flutter/drift_flutter.dart';
 
+import '../../core/utils/app_dirs.dart';
+
 part 'app_db.g.dart';
 
 /// A conversation. The visible thread is the path from the root to [activeLeafId] (branching on edit/regenerate).
@@ -145,7 +147,7 @@ class Settings extends Table {
 
 @DriftDatabase(tables: [Chats, Messages, Memories, LlmProviders, LlmModels, McpServers, Skills, NasDevices, Settings])
 class AppDb extends _$AppDb {
-  AppDb([QueryExecutor? e]) : super(e ?? driftDatabase(name: 'nur'));
+  AppDb([QueryExecutor? e]) : super(e ?? driftDatabase(name: 'nur', native: const DriftNativeOptions(databaseDirectory: appFilesDir)));
 
   @override
   int get schemaVersion => 1;

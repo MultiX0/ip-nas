@@ -62,6 +62,14 @@ void main() {
     expect(c.phase, CallPhase.listening);
   });
 
+  test('a PC without microphone access gets a plain message, not an app settings button', () async {
+    mic.permission = false;
+    await c.start();
+    expect(c.error, contains('Allow microphone access'));
+    expect(c.errorNeedsPermission, isFalse); // permission_handler cannot open settings on Windows or Linux
+    expect(mic.starts, 0);
+  });
+
   test('closing the call while it connects never opens the microphone', () async {
     fish.validateDelay = const Duration(milliseconds: 150);
     final starting = c.start();

@@ -262,7 +262,14 @@ class ActiveNasNotifier extends AsyncNotifier<NasHubClientImpl?> {
 String _deviceName() {
   try {
     final host = Platform.localHostname;
-    final os = Platform.isAndroid ? 'Android' : Platform.isIOS ? 'iPhone' : Platform.isWindows ? 'Windows' : Platform.operatingSystem;
+    final os = switch (Platform.operatingSystem) {
+      'android' => 'Android',
+      'ios' => 'iPhone',
+      'windows' => 'Windows',
+      'linux' => 'Linux',
+      'macos' => 'macOS',
+      final other => other,
+    };
     return 'Nur on $os ($host)';
   } catch (_) {
     return 'Nur app';

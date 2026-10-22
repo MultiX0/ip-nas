@@ -5,11 +5,11 @@ import 'dart:io';
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../../core/contracts/llm.dart';
 import '../../../core/providers.dart';
+import '../../../core/utils/app_dirs.dart';
 import '../../../data/db/app_db.dart' hide LlmModel;
 
 const _uuid = Uuid();
@@ -226,7 +226,7 @@ String stripFileBlocks(String s) => s.replaceAll(_fileBlock, '').trimRight();
 List<String> fileNamesIn(String s) => _fileBlock.allMatches(s).map((m) => m.group(1) ?? 'file').toList();
 
 Future<Directory> attachmentsDir() async {
-  final d = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'nur', 'attachments'));
+  final d = Directory(p.join((await appFilesDir()).path, 'nur', 'attachments'));
   if (!await d.exists()) await d.create(recursive: true);
   return d;
 }

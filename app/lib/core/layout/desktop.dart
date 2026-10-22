@@ -324,13 +324,15 @@ class HoverReveal extends StatelessWidget {
   }
 }
 
-/// Clipboard images and copied files on Windows; the native side is in windows/runner/flutter_window.cpp.
+/// Clipboard images and copied files on Windows and Linux; the native side is in windows/runner/flutter_window.cpp
+/// and linux/runner/my_application.cc.
 class DesktopClipboard {
   static const _channel = MethodChannel('nur/desktop');
+  static bool get _supported => !kIsWeb && (Platform.isWindows || Platform.isLinux);
 
-  /// PNG (or BMP) bytes of an image on the clipboard, or null. Windows only.
+  /// PNG (or BMP on Windows) bytes of an image on the clipboard, or null.
   static Future<Uint8List?> image() async {
-    if (kIsWeb || !Platform.isWindows) return null;
+    if (!_supported) return null;
     try {
       return await _channel.invokeMethod<Uint8List>('clipboardImage');
     } on MissingPluginException {
@@ -340,9 +342,9 @@ class DesktopClipboard {
     }
   }
 
-  /// Paths of files copied in Explorer, or an empty list. Windows only.
+  /// Paths of files copied in the file manager, or an empty list.
   static Future<List<String>> files() async {
-    if (kIsWeb || !Platform.isWindows) return const [];
+    if (!_supported) return const [];
     try {
       final r = await _channel.invokeListMethod<String>('clipboardFiles');
       return r ?? const [];

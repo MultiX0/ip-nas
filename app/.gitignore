@@ -15,6 +15,9 @@ app.*.map.json
 windows/flutter/ephemeral/
 windows/flutter/generated_plugin_registrant.*
 windows/flutter/generated_plugins.cmake
+linux/flutter/ephemeral/
+linux/flutter/generated_plugin_registrant.*
+linux/flutter/generated_plugins.cmake
 android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
 ios/Runner/GeneratedPluginRegistrant.*
 ios/Flutter/ephemeral/

@@ -31,12 +31,13 @@ Future<void> waitFor(bool Function() ok, {Duration timeout = const Duration(seco
 class FakeMic implements MicStream {
   int starts = 0, stops = 0;
   bool disposed = false;
+  bool permission = true;
   StreamController<Uint8List>? _out;
 
   bool get open => _out != null && !_out!.isClosed && _out!.hasListener;
 
   @override
-  Future<bool> hasPermission() async => true;
+  Future<bool> hasPermission() async => permission;
 
   @override
   Future<Stream<Uint8List>> start() async {

@@ -19,6 +19,7 @@ Secrets (API keys, the hub token) are kept in flutter_secure_storage, never in t
 | `lib/features/shell/` | the desktop sidebar and the settings screen and dialog |
 | `shaders/` | fragment shaders for the call orb and its backdrop |
 | `assets/` | fonts, provider logos, the source images of the app icon |
+| `android/`, `ios/`, `windows/`, `linux/` | the platform runners; the Windows and Linux ones also answer the `nur/desktop` channel (clipboard images and copied files) |
 | `test/` | unit and widget tests |
 
 ## How the parts talk

@@ -1,5 +1,6 @@
 // Low-latency audio: streaming PCM playback with SoLoud, mic capture, an energy VAD and WAV encoding.
 import 'dart:async';
+import 'dart:io';
 import 'dart:isolate';
 import 'dart:math' as math;
 import 'dart:typed_data';
@@ -8,7 +9,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_soloud/flutter_soloud.dart';
 import 'package:record/record.dart';
 
-import 'fish_audio.dart' show fishSampleRate;
+import 'fish_audio.dart' show FishException, fishSampleRate;
 
 class AudioEngine {
   static Future<void>? _init;
@@ -362,6 +363,17 @@ class EnergyVad {
   }
 }
 
+/// Starts a raw PCM16 microphone stream. On Linux, record captures with parecord (PulseAudio and PipeWire both work
+/// with it), and a system without it gets told what to install instead of a process error.
+Future<Stream<Uint8List>> startPcmStream(AudioRecorder rec, RecordConfig config) async {
+  try {
+    return await rec.startStream(config);
+  } on ProcessException {
+    if (!Platform.isLinux) rethrow;
+    throw FishException('Nur needs parecord for the microphone on Linux. Install it with: sudo apt install pulseaudio-utils');
+  }
+}
+
 /// Microphone PCM16 mono stream (16 kHz) with echo cancellation where the platform offers it.
 class MicStream {
   final AudioRecorder _rec = AudioRecorder();
@@ -369,7 +381,8 @@ class MicStream {
 
   Future<bool> hasPermission() => _rec.hasPermission();
 
-  Future<Stream<Uint8List>> start() => _rec.startStream(
+  Future<Stream<Uint8List>> start() => startPcmStream(
+    _rec,
     const RecordConfig(
       encoder: AudioEncoder.pcm16bits,
       sampleRate: sampleRate,

@@ -27,6 +27,8 @@ abstract class CallViewModel implements Listenable {
   /// A blocking error (the call cannot continue without the user acting).
   String? get error;
   bool get errorNeedsSettings;
+
+  /// The microphone permission was denied on a phone, where the app settings page can turn it back on.
   bool get errorNeedsPermission;
 
   bool get muted;

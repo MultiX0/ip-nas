@@ -223,7 +223,6 @@ class VoiceCallController extends ChangeNotifier implements CallViewModel {
           );
         }
       } else if (!await _mic.hasPermission()) {
-        errorNeedsPermission = true;
         throw FishException('Nur cannot use the microphone. Allow microphone access in your system settings.');
       }
       await Future.wait([fish.validateKey(), _audio.ready()]);

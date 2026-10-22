@@ -5,10 +5,10 @@ import 'dart:io';
 import 'package:dio/dio.dart';
 import 'package:drift/drift.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 
 import '../../core/providers.dart';
+import '../../core/utils/app_dirs.dart';
 import '../../data/db/app_db.dart' hide LlmModel, NasDevice;
 import '../context/intel_settings.dart';
 import 'builtin_skills.dart';
@@ -94,7 +94,7 @@ class SkillsRepo {
   }
 
   Future<Skill> installFromZipBytes(List<int> bytes, {String source = 'zip'}) async {
-    final docs = await getApplicationDocumentsDirectory();
+    final docs = await appFilesDir();
     final tmp = Directory('${docs.path}/skills/.tmp_${_uuid.v4()}');
     await tmp.create(recursive: true);
     try {

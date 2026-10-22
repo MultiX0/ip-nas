@@ -15,11 +15,11 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
 import 'package:path/path.dart' as p;
-import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:record/record.dart';
 
 import '../../core/theme/nur_theme.dart';
+import '../../core/utils/app_dirs.dart';
 import '../../core/widgets/nur_icons.dart';
 import 'audio_engine.dart';
 import 'fish_audio.dart';
@@ -66,6 +66,10 @@ class _Recorder extends ChangeNotifier {
 
   AudioRecorder? _rec;
   StreamSubscription<Amplitude>? _amp;
+
+  /// Linux: the raw microphone stream, written to the WAV file when the recording stops.
+  BytesBuilder? _pcm;
+  Future<void>? _pcmDone;
   Timer? _timer;
   final _sw = Stopwatch();
   String? path;
@@ -96,18 +100,30 @@ class _Recorder extends ChangeNotifier {
           return;
         }
       } else if (!await rec.hasPermission()) {
-        _fail('Nur cannot use the microphone. Allow microphone access in your system settings.', _ErrKind.permission);
+        _fail('Nur cannot use the microphone. Allow microphone access in your system settings.');
         return;
       }
-      final dir = Directory(p.join((await getApplicationDocumentsDirectory()).path, 'voice_messages'));
+      final dir = Directory(p.join((await appFilesDir()).path, 'voice_messages'));
       await dir.create(recursive: true);
-      final wav = await rec.isEncoderSupported(AudioEncoder.wav);
-      path = p.join(dir.path, 'voice_${DateTime.now().millisecondsSinceEpoch}.${wav ? 'wav' : 'm4a'}');
-      if (_disposed) return;
-      await rec.start(
-        RecordConfig(encoder: wav ? AudioEncoder.wav : AudioEncoder.aacLc, sampleRate: 16000, numChannels: 1, noiseSuppress: true, autoGain: true),
-        path: path!,
-      );
+      if (Platform.isLinux) {
+        // record encodes files with ffmpeg on Linux; the raw stream only needs parecord, and the WAV is written here.
+        path = p.join(dir.path, 'voice_${DateTime.now().millisecondsSinceEpoch}.wav');
+        if (_disposed) return;
+        final pcm = _pcm = BytesBuilder(copy: false);
+        final stream = await startPcmStream(
+          rec,
+          const RecordConfig(encoder: AudioEncoder.pcm16bits, sampleRate: MicStream.sampleRate, numChannels: 1, noiseSuppress: true, autoGain: true),
+        );
+        _pcmDone = stream.forEach(pcm.add);
+      } else {
+        final wav = await rec.isEncoderSupported(AudioEncoder.wav);
+        path = p.join(dir.path, 'voice_${DateTime.now().millisecondsSinceEpoch}.${wav ? 'wav' : 'm4a'}');
+        if (_disposed) return;
+        await rec.start(
+          RecordConfig(encoder: wav ? AudioEncoder.wav : AudioEncoder.aacLc, sampleRate: 16000, numChannels: 1, noiseSuppress: true, autoGain: true),
+          path: path!,
+        );
+      }
       _sw.start();
       sampleClock.start();
       _timer = Timer.periodic(const Duration(milliseconds: 200), (_) {
@@ -125,7 +141,7 @@ class _Recorder extends ChangeNotifier {
       haptic(Haptic.toggle);
       _set(_RecState.recording);
     } catch (e) {
-      _fail('Could not start recording: $e');
+      _fail(e is FishException ? e.message : 'Could not start recording: $e');
     }
   }
 
@@ -140,6 +156,9 @@ class _Recorder extends ChangeNotifier {
     try {
       if (await rec.isRecording()) await rec.stop();
     } catch (_) {}
+    // The stream ends when parecord exits; whatever came in until then is kept, even if it ended with an error.
+    await _pcmDone?.timeout(const Duration(seconds: 2), onTimeout: () {}).catchError((Object _) {});
+    _pcmDone = null;
   }
 
   Duration get recorded => _sw.elapsed;
@@ -158,6 +177,11 @@ class _Recorder extends ChangeNotifier {
     error = null;
     _set(_RecState.transcribing);
     try {
+      final pcm = _pcm;
+      if (pcm != null) {
+        _pcm = null;
+        await File(file).writeAsBytes(await encodeWav(pcm.takeBytes(), MicStream.sampleRate));
+      }
       final bytes = await File(file).readAsBytes();
       _cancel = CancelToken();
       final r = await fish.transcribe(bytes, filename: p.basename(file), language: prefs.sttLanguage, model: prefs.sttModel, cancel: _cancel);

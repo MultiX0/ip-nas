@@ -147,7 +147,7 @@ In the video I use llama.cpp with Qwen3.5 2B (Q4_0, a 1.2 GB download that needs
 
 Nur is my Flutter app (Android and Windows; iOS is set up but untested) for chatting with local or cloud models and for voice calls with Fish
 Audio Drama 3, in Arabic or English. Open it on the same Wi-Fi as the NAS and tap your NAS: the first device becomes
-the owner, and later ones need its approval. Ready builds for Android (APK) and Windows are on the
+the owner, and later ones need its approval. Ready builds for Android (APK), Windows and Linux are on the
 [Releases](https://github.com/MultiX0/ip-nas/releases) page; building it yourself is in [app/README.md](app/README.md), the voice details
 and timings in [docs/FISH_AUDIO.md](docs/FISH_AUDIO.md).
 

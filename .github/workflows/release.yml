@@ -82,7 +82,8 @@ jobs:
           path: nur-windows-x64.zip
 
   linux:
-    runs-on: ubuntu-latest
+    # 22.04 so the bundle also runs on Ubuntu 22.04 and Debian 12 (older glibc)
+    runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
       - name: Build tools and libraries
