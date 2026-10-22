@@ -13,23 +13,31 @@ memory shortage, so check before you buy. The Amazon and AliExpress links are se
 
 | Part | Qty | Price (USD) | Where to buy | Notes |
 |---|---|---|---|---|
-| Raspberry Pi 5, 4 GB | 1 | 110 | [raspberrypi.com](https://www.raspberrypi.com/products/raspberry-pi-5/) | official resellers per country; the 8 GB board fits the case too |
-| Raspberry Pi Active Cooler | 1 | 5 | [raspberrypi.com](https://www.raspberrypi.com/products/active-cooler/) | the Pi 5 throttles without it |
+| Raspberry Pi 5, 4 GB | 1 | 110 | [raspberrypi.com](https://www.raspberrypi.com/products/raspberry-pi-5/) | official resellers per country; the 8 GB board (175) fits the case too |
+| Raspberry Pi Active Cooler | 1 | 5 | [raspberrypi.com](https://www.raspberrypi.com/products/active-cooler/) | the Pi 5 throttles without it; US stores ask 11 to 15 |
 | Raspberry Pi 27W USB-C Power Supply | 1 | 12 | [raspberrypi.com](https://www.raspberrypi.com/products/27w-power-supply/) | 5.1 V, 5 A; with a weaker supply the Pi gives its USB ports 0.6 A instead of 1.6 A |
-| microSD card, 64 GB or more | 1 | ~10 | [Amazon](https://www.amazon.com/s?k=microSD+64GB+A1) | A1 or A2; mine is 128 GB |
+| microSD card, 64 GB or more | 1 | ~18 | [Amazon](https://www.amazon.com/s?k=microSD+64GB+A1) | A1 or A2; mine is 128 GB; card prices about doubled in 2026 |
 | USB microSD card reader | 1 | ~2 | [AliExpress](https://www.aliexpress.com/w/wholesale-micro-SD-card-reader-USB.html) | to flash the card on the PC |
-| Micro-HDMI to HDMI cable | 1 | ~3 | [AliExpress](https://www.aliexpress.com/w/wholesale-micro-HDMI-to-HDMI-cable.html) | first boot only, with any HDMI screen |
-| USB keyboard | 1 | ~8 | [Amazon](https://www.amazon.com/s?k=USB+keyboard) | first boot only |
-| 2.5" SATA hard drive or SSD | 2 | | | I used two old ones: WD Blue WD3200LPVX 320 GB (7 mm) and WD Scorpio Blue WD1600BEVT 160 GB (9.5 mm) |
-| UGREEN 20611 USB 3.0 to SATA cable | 2 | ~18 each | [Amazon](https://www.amazon.com/s?k=UGREEN+20611+USB+3.0+to+SATA) | each box has a 12 V / 2 A adapter, you only use one of them |
+| Micro-HDMI to HDMI cable | 1 | ~4 | [AliExpress](https://www.aliexpress.com/w/wholesale-micro-HDMI-to-HDMI-cable.html) | first boot only, with any HDMI screen |
+| USB keyboard | 1 | ~12 | [Amazon](https://www.amazon.com/s?k=USB+keyboard) | first boot only |
+| 2.5" SATA hard drive or SSD | 2 | ~55 each | [Amazon](https://www.amazon.com/s?k=WD10SPZX) | I used two old ones: WD Blue WD3200LPVX 320 GB (7 mm) and WD Scorpio Blue WD1600BEVT 160 GB (9.5 mm); the price is for a new 1 TB WD Blue WD10SPZX (7 mm), SATA SSDs cost more |
+| UGREEN 20611 USB 3.0 to SATA cable | 2 | ~17 each | [Amazon](https://www.amazon.com/s?k=UGREEN+20611+USB+3.0+to+SATA) | each box has a 12 V / 2 A adapter, you only use one of them |
 | DC splitter, 1 female to 4 male, 5.5 x 2.1 mm | 1 | ~2 | [AliExpress](https://www.aliexpress.com/w/wholesale-DC-splitter-1-female-to-4-male-5.5x2.1.html) | the 12 V adapter plugs into its socket and its plugs go into the UGREEN cables, so one adapter feeds both drives |
 | 4-port USB hub | 1 | ~5 | [AliExpress](https://www.aliexpress.com/w/wholesale-4-port-USB-hub.html) | the case is made for a HAING HI-U302 (77 x 41.4 x 12.1 mm, all 4 ports on one long side), so check the size of any other hub |
 | Guition JC3248W535 3.5" touch screen (ESP32-S3) | 1 | ~20 | [AliExpress](https://www.aliexpress.com/w/wholesale-JC3248W535.html) | |
 | UGREEN angled USB-C to USB-A cable, 1 m | 1 | ~8 | [Amazon](https://www.amazon.com/s?k=UGREEN+right+angle+USB+C+to+USB+A+cable) | screen to Pi; the angled USB-C end goes on the back of the screen |
-| M3x10 screw + M3 nut | 4 + 4 | | | back door |
-| M3x6 screw + M3 nut | 4 + 4 | | | legs |
-| M2.5x12 nylon screw + M2.5 nut | 4 + 4 | | | Pi on the back door |
-| Black PLA | about 156 g | | | the 4 printed parts |
+| M3x10 screw + M3 nut | 4 + 4 | ~1 | [AliExpress](https://www.aliexpress.com/w/wholesale-M3-screw-nut-kit.html) | back door; screws and nuts come in packs of 10 or more |
+| M3x6 screw + M3 nut | 4 + 4 | ~1 | [AliExpress](https://www.aliexpress.com/w/wholesale-M3-screw-nut-kit.html) | legs |
+| M2.5x12 nylon screw + M2.5 nut | 4 + 4 | ~2 | [AliExpress](https://www.aliexpress.com/w/wholesale-M2.5-nylon-screw.html) | Pi on the back door |
+| Black PLA | about 156 g | ~3 | [Amazon](https://www.amazon.com/s?k=black+PLA+filament+1kg) | the 4 printed parts; a 1 kg spool is about 15 to 25 |
+
+All of it without the drives and the printer comes to about 239 USD, or about 221 without the card reader, the
+micro-HDMI cable and the keyboard you only need for the first boot.
+
+In the Arab world (October 2026) I couldn't find the Pi 5 on Amazon.sa, Amazon.ae, Amazon.eg or noon. Import sites
+list the 4 GB board at about twice the official price (Desertcart SAR 814 or AED 980, Ubuy Egypt EGP 11,445), so
+check the official resellers for your country on raspberrypi.com first. Newegg Saudi Arabia has the official 27W
+supply for SAR 90.53, and in Jordan the HAING HI-U302 hub is 3.95 JOD at PC Circle.
 
 ## The build, in the order of the video
 
