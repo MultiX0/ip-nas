@@ -147,6 +147,11 @@ The hub refuses a model when its file size plus 0.9 GB is more than the NAS's RA
 less than 0.5 GB free. After a download it restarts the llama.cpp container, because llama.cpp only looks at the models
 folder when it starts. Ollama models are pulled by name (`qwen3:4b`).
 
+llama.cpp's router (seen with build b11819) can lose a model process and then answer every request with "Could not
+establish connection" until it is restarted. The hub notices that answer, restarts the llama.cpp container and tells
+the app to try again in a minute. It waits 1, 2, 4 and 8 minutes between restarts and stops after 5 in a row without a
+working answer, and its log says each time.
+
 The Get models list in the app is [`catalog.json`](catalog.json): the models I tried on the Pi 5 with 4 GB.
 
 | Model | Download | Tool calls | On the Pi 5 (4 GB) |
@@ -236,6 +241,7 @@ CasaOS keeps its copy of the compose file in that folder. With your own compose 
 | "Pairing is locked" | `devices.json` is broken. Fix or delete it, then restart the hub. |
 | "Too many devices are waiting for approval" | 5 requests are open. Answer them in the app or wait 5 minutes. |
 | Web search says "SearXNG refused JSON output" | Add `json` under `search: formats:` in `/DATA/AppData/searxng/settings.yml` and run `sudo docker restart searxng` ([pi/README.md](../pi/README.md#8-searxng)). |
+| "llama.cpp lost its model process" | The hub restarts llama.cpp by itself; try again after a minute. If it keeps happening, `sudo docker logs nur-llamacpp` usually shows a model that does not fit in the RAM. |
 | "The local AI runtime is not running" | Start llama.cpp or Ollama in the app (NAS, Runtimes) and look at `sudo docker logs nur-llamacpp`. |
 | A model download is refused | Not enough RAM (file size plus 0.9 GB) or disk space (file size plus 0.5 GB). |
 | "Nur Hub has no access to Docker" | The hub is not running as root. |

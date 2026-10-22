@@ -1365,8 +1365,8 @@ def download_llama(job: Job, repo: str, file: str, size: int):
     reload_llama_models()
 
 
-def reload_llama_models() -> None:
-    """llama.cpp in router mode scans --models-dir only at start: restart its container so a new file is usable at once."""
+def reload_llama_models(why: str = "so llama.cpp sees the new model") -> None:
+    """llama.cpp in router mode reads --models-dir only at start, so a new model file needs a container restart."""
     try:
         row = find_runtime_container("llamacpp", docker_ps_all())
         if row is None:
@@ -1374,11 +1374,73 @@ def reload_llama_models() -> None:
         name = container_name(row)
         rc, _, err = docker(["restart", name], timeout=60)
         if rc == 0:
-            log.info("Restarted %s so llama.cpp sees the new model", name)
+            log.info("Restarted %s %s", name, why)
         else:
             log.warning("Could not restart %s: %s", name, err.strip()[:200])
-    except Exception as e:  # never fail a finished download because of this
-        log.warning("llama.cpp reload after download failed: %s", e)
+    except Exception as e:  # never fail a finished download or a proxied request because of this
+        log.warning("Restarting llama.cpp failed: %s", e)
+
+
+class LlamaRecovery:
+    """Restarts the llama.cpp container when its router lost a model process.
+
+    Seen with b11819: the router keeps using the dead child's port and answers 500 "Could not establish connection".
+    Restarts back off (1, 2, 4, 8 minutes) and stop after MAX_IN_ROW of them without a good answer in between.
+    """
+
+    MARKER = b"could not establish connection"
+    MIN_GAP = 60.0
+    MAX_IN_ROW = 5
+
+    def __init__(self, restart=None, clock=time.monotonic):
+        self.lock = threading.Lock()
+        self.restart = restart
+        self.clock = clock
+        self.in_row = 0
+        self.last = None
+        self.running = False
+        self.gave_up_logged = False
+
+    def trigger(self) -> str:
+        """'restarting', 'wait' (one ran or runs right now) or 'gave_up'."""
+        with self.lock:
+            if self.in_row >= self.MAX_IN_ROW:
+                if not self.gave_up_logged:
+                    self.gave_up_logged = True
+                    log.error("llama.cpp lost its model process again after %d restarts; Nur Hub stops restarting it "
+                              "until a request works or the runtime is started from the app", self.in_row)
+                return "gave_up"
+            now = self.clock()
+            gap = self.MIN_GAP * 2 ** max(self.in_row - 1, 0)
+            if self.running or (self.last is not None and now - self.last < gap):
+                return "wait"
+            self.in_row += 1
+            self.last = now
+            self.running = True
+            n = self.in_row
+        log.warning("llama.cpp lost its model process (Could not establish connection); restarting it (%d of %d)",
+                    n, self.MAX_IN_ROW)
+        threading.Thread(target=self._run, daemon=True, name="llama-recovery").start()
+        return "restarting"
+
+    def _run(self):
+        try:
+            if self.restart is not None:
+                self.restart()
+            else:
+                reload_llama_models("after its model process died")
+        finally:
+            with self.lock:
+                self.running = False
+
+    def reset(self):
+        """A request worked, or someone started or stopped the runtime by hand."""
+        with self.lock:
+            self.in_row = 0
+            self.gave_up_logged = False
+
+
+LLAMA_RECOVERY = LlamaRecovery()
 
 
 def download_ollama(job: Job, name: str):
@@ -1557,7 +1619,7 @@ class Handler(BaseHTTPRequestHandler):
             if path in ("/llm", "/ollama") or path.startswith(("/llm/", "/ollama/")):
                 self.require_auth()
                 if path.startswith("/llm"):
-                    self.proxy(CFG.llama_url, path[len("/llm"):] or "/", split.query)
+                    self.proxy(CFG.llama_url, path[len("/llm"):] or "/", split.query, llama=True)
                 else:
                     self.proxy(CFG.ollama_url, path[len("/ollama"):] or "/", split.query)
                 return
@@ -1607,7 +1669,7 @@ class Handler(BaseHTTPRequestHandler):
 
     do_GET = do_POST = do_DELETE = do_PUT = do_PATCH = do_HEAD = do_OPTIONS = _dispatch
 
-    def proxy(self, base: str, upstream_path: str, query: str):
+    def proxy(self, base: str, upstream_path: str, query: str, llama: bool = False):
         u = urllib.parse.urlsplit(base)
         path = (u.path.rstrip("/") + upstream_path) or "/"
         if query:
@@ -1638,6 +1700,19 @@ class Handler(BaseHTTPRequestHandler):
             clen = resp.getheader("Content-Length")
             no_body = self.command == "HEAD" or resp.status in (204, 304) or resp.status < 200
             stream = "chunked" in te or "text/event-stream" in ctype or clen is None
+            buffered = None
+            if llama and resp.status >= 500 and not stream and not no_body:
+                buffered = resp.read()
+                if LlamaRecovery.MARKER in buffered.lower():
+                    state = LLAMA_RECOVERY.trigger()
+                    raise ApiError(503, "llama.cpp lost its model process. " + {
+                        "restarting": "Nur Hub is restarting it, try again in a minute",
+                        "wait": "Nur Hub restarted it a moment ago, try again in a minute",
+                        "gave_up": "It keeps happening, so Nur Hub stopped restarting it. The llama.cpp logs on the "
+                                   "NAS say why (often a model too big for the RAM)",
+                    }[state])
+            elif llama and self.command == "POST" and 200 <= resp.status < 400:
+                LLAMA_RECOVERY.reset()
             self.send_response(resp.status, resp.reason)
             up_conn = {t.strip().lower() for t in (resp.getheader("Connection") or "").split(",")}
             for k, v in resp.getheaders():
@@ -1665,6 +1740,10 @@ class Handler(BaseHTTPRequestHandler):
                     self.wfile.flush()
                 self.wfile.write(b"0\r\n\r\n")
                 self.wfile.flush()
+            elif buffered is not None:
+                self.send_header("Content-Length", str(len(buffered)))
+                self.end_headers()
+                self.wfile.write(buffered)
             else:
                 self.send_header("Content-Length", clen)
                 self.end_headers()
@@ -1928,6 +2007,8 @@ class Handler(BaseHTTPRequestHandler):
     def api_runtime_action(self, rt, action):
         if rt not in RUNTIMES:
             raise ApiError(404, "Unknown runtime. Use 'llamacpp' or 'ollama'")
+        if rt == "llamacpp":
+            LLAMA_RECOVERY.reset()
         spec = RUNTIMES[rt]
         docker_bin()
         if action == "install":

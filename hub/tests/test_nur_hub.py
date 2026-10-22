@@ -352,6 +352,47 @@ class JobManagerTest(unittest.TestCase):
         self.assertLessEqual(len(jobs.list()), jobs.KEEP)
 
 
+class LlamaRecoveryTest(unittest.TestCase):
+    def setUp(self):
+        self.now = 1000.0
+        self.calls = []
+        self.rec = hub.LlamaRecovery(restart=lambda: self.calls.append(self.now), clock=lambda: self.now)
+
+    def trigger(self):
+        state = self.rec.trigger()
+        end = time.time() + 5
+        while self.rec.running and time.time() < end:
+            time.sleep(0.01)
+        return state
+
+    def test_backoff_and_limit(self):
+        self.assertEqual(self.trigger(), "restarting")
+        self.assertEqual(self.trigger(), "wait")
+        for gap in (60, 120, 240, 480):
+            self.now += gap - 1
+            self.assertEqual(self.trigger(), "wait")
+            self.now += 1
+            self.assertEqual(self.trigger(), "restarting")
+        self.assertEqual(len(self.calls), hub.LlamaRecovery.MAX_IN_ROW)
+        self.now += 100000
+        with self.assertLogs("nur-hub", level="ERROR") as logs:
+            self.assertEqual(self.trigger(), "gave_up")
+            self.assertEqual(self.trigger(), "gave_up")
+        self.assertEqual(len(logs.output), 1)
+        self.assertEqual(len(self.calls), hub.LlamaRecovery.MAX_IN_ROW)
+        self.rec.reset()
+        self.assertEqual(self.trigger(), "restarting")
+        self.assertEqual(len(self.calls), hub.LlamaRecovery.MAX_IN_ROW + 1)
+
+    def test_one_restart_at_a_time(self):
+        gate = threading.Event()
+        rec = hub.LlamaRecovery(restart=lambda: gate.wait(5), clock=lambda: self.now)
+        self.assertEqual(rec.trigger(), "restarting")
+        self.now += 100000
+        self.assertEqual(rec.trigger(), "wait")
+        gate.set()
+
+
 class RunCappedTest(unittest.TestCase):
     def test_output_cap(self):
         rc, out, err, timed_out = hub.run_capped([sys.executable, "-c", "print('x' * 100000)"], timeout=30, cap=1000)
@@ -394,6 +435,7 @@ class FakeUpstream(BaseHTTPRequestHandler):
     seen_headers: dict = {}
     model_bytes = bytes(range(256)) * 40
     ignore_range = False
+    child_dead = False  # llama.cpp router whose model process died
 
     def log_message(self, *args):
         pass
@@ -445,6 +487,11 @@ class FakeUpstream(BaseHTTPRequestHandler):
     def do_POST(self):
         FakeUpstream.seen_headers = dict(self.headers)
         body = self.rfile.read(int(self.headers.get("Content-Length") or 0))
+        if self.path == "/v1/chat/completions" and self.child_dead:
+            return self.send_body(500, b'{"error": {"code": 500, "message": "Could not establish connection", '
+                                       b'"type": "server_error"}}')
+        if self.path == "/v1/other-error":
+            return self.send_body(500, b'{"error": "boom"}')
         if self.path == "/v1/chat/completions":
             self.send_response(200)
             self.send_header("Content-Type", "text/event-stream")
@@ -680,6 +727,30 @@ class HttpTest(unittest.TestCase):
         self.assertEqual(body.count(b"data: "), 4)
         self.assertTrue(body.endswith(b"data: [DONE]\n\n"))
         self.assertEqual(self.get("/ollama/api/tags")[0], 502)  # nothing listens on the Ollama port
+
+    def test_dead_model_process_restarts_llama_once(self):
+        restarts = []
+        rec = hub.LlamaRecovery(restart=lambda: restarts.append(1))
+        chat = ("POST", "/llm/v1/chat/completions", {"stream": True})
+        with mock.patch.object(hub, "LLAMA_RECOVERY", rec):
+            FakeUpstream.child_dead = True
+            try:
+                first = self.call(*chat, token=self.token)
+                second = self.call(*chat, token=self.token)
+            finally:
+                FakeUpstream.child_dead = False
+            self.assertEqual((first[0], second[0]), (503, 503))
+            self.assertIn("restarting it", first[2]["error"])
+            self.assertIn("a moment ago", second[2]["error"])
+            end = time.time() + 5
+            while rec.running and time.time() < end:
+                time.sleep(0.01)
+            self.assertEqual(restarts, [1])
+            status, _, body = self.call("POST", "/llm/v1/other-error", {}, token=self.token)
+            self.assertEqual((status, body), (500, {"error": "boom"}))  # other errors pass through untouched
+            self.assertEqual(rec.in_row, 1)
+            self.assertEqual(self.call(*chat, token=self.token)[0], 200)
+            self.assertEqual(rec.in_row, 0)  # a good answer resets the backoff
 
 
 class DownloadTest(unittest.TestCase):
