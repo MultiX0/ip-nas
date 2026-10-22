@@ -1,0 +1,64 @@
+{
+ "A_body": {
+  "g": 109.97,
+  "m": 36.87,
+  "time": "4h 13m 31s"
+ },
+ "B_back_door": {
+  "g": 24.39,
+  "m": 8.18,
+  "time": "1h 22m 41s"
+ },
+ "C_crown": {
+  "g": 18.0,
+  "m": 6.03,
+  "time": "29m 7s"
+ },
+ "D_legs_x4": {
+  "g": 4.04,
+  "m": 1.36,
+  "time": "11m 52s"
+ },
+ "A_body_brim5": {
+  "g": 110.42,
+  "m": 37.02,
+  "time": "4h 15m 13s"
+ },
+ "orca": {
+  "A_body": {
+   "g": 107.52,
+   "m": 35.48,
+   "time": "3h 42m 2s"
+  },
+  "B_back_door": {
+   "g": 23.74,
+   "m": 7.83,
+   "time": "1h 32m 2s"
+  },
+  "C_crown": {
+   "g": 18.06,
+   "m": 5.96,
+   "time": "26m 27s"
+  },
+  "D_legs_x4": {
+   "g": 3.77,
+   "m": 1.25,
+   "time": "9m 44s"
+  }
+ },
+ "orca_plate": {
+  "g": 152.13,
+  "m": 50.2,
+  "time": "5h 51m 32s"
+ },
+ "total_g": 156.4,
+ "total_g_brim": 156.85,
+ "total_m": 52.44,
+ "orca_total_g": 153.09,
+ "warnings": {
+  "prusa": "none on all 4 parts",
+  "orca_bambu_x1c": "none on all 4 parts and on the full plate; max_cantilever_dist 0"
+ },
+ "slicer": "PrusaSlicer 2.9.6 CLI + OrcaSlicer 2.4.2 CLI (Bambu Lab X1 Carbon 0.4, 0.20mm Standard @BBL X1C, Bambu PLA Basic)",
+ "settings": "--layer-height 0.2 --first-layer-height 0.2 --perimeters 4 --top-solid-layers 5 --bottom-solid-layers 5 --fill-density 15% --fill-pattern gyroid --nozzle-diameter 0.4 --filament-diameter 1.75 --filament-density 1.24 --filament-cost 120 --temperature 220 --bed-temperature 60 --bed-shape 0x0,256x0,256x256,0x256 --max-print-height 256 --skirts 0 --no-support-material --center 128,128 --gcode-flavor marlin2 --perimeter-speed 200 --external-perimeter-speed 150 --small-perimeter-speed 100 --infill-speed 250 --solid-infill-speed 200 --top-solid-infill-speed 120 --bridge-speed 50 --gap-fill-speed 100 --travel-speed 400 --first-layer-speed 50 --default-acceleration 5000 --perimeter-acceleration 5000 --infill-acceleration 8000 --travel-acceleration 10000 --machine-max-acceleration-extruding 20000 --machine-max-acceleration-travel 20000 --machine-max-acceleration-x 20000 --machine-max-acceleration-y 20000 --machine-max-feedrate-x 500 --machine-max-feedrate-y 500 --max-volumetric-speed 21"
+}

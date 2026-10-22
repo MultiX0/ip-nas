@@ -1,0 +1,28 @@
+# SearXNG, the web search Nur Hub uses. Web page and JSON API on port 8888.
+# CasaOS: + > Install a customized app > import > paste this file > Submit > Install.
+# Nur Hub asks for format=json, so /DATA/AppData/searxng/settings.yml needs json in search.formats,
+# or every search answers 403. The settings file is in pi/README.md (SearXNG).
+name: searxng
+services:
+  searxng:
+    image: searxng/searxng:latest
+    container_name: searxng
+    restart: unless-stopped
+    ports:
+      - "8888:8080"
+    volumes:
+      - /DATA/AppData/searxng:/etc/searxng
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: searxng
+  category: Utilities
+  icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/searxng.png
+  title:
+    en_US: SearXNG
+  tagline:
+    en_US: Private web search for Nur and your browser
+  port_map: "8888"
+  scheme: http
+  index: /

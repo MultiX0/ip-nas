@@ -1,0 +1,115 @@
+# Nextcloud as the CasaOS App Store installs it (BigBear's "Nextcloud": Nextcloud 35 with smbclient, PostgreSQL, Redis
+# and a cron container), web page on port 7580. What I changed from the store app:
+#   - your own passwords instead of casaos/casaos: replace every CHANGE_ME, the two POSTGRES_PASSWORD values must match
+#   - the files go to HDD1 (/DATA/HDD1/nextcloud, owner 33:33, see pi/README.md); the rest stays in /DATA/AppData
+#   - NEXTCLOUD_TRUSTED_DOMAINS, so the first visit doesn't end in "Access through untrusted domain"
+# The name stays big-bear-nextcloud: CasaOS then offers the store's newer images as updates, and an update only swaps
+# the images, so these changes stay.
+name: big-bear-nextcloud
+services:
+  nextcloud:
+    container_name: nextcloud
+    image: bigbeartechworld/big-bear-nextcloud-with-smbclient:35.0.2@sha256:8fe245e137a6ae96a58b9ad4c5f782efa01197c36b892af1a8a9a6a206369475
+    restart: unless-stopped
+    ports:
+      - "7580:80"
+    volumes:
+      - /DATA/AppData/big-bear-nextcloud/html:/var/www/html
+      # long form on purpose: without the drive the folder is missing and the app doesn't start, instead of
+      # filling the SD card
+      - type: bind
+        source: /DATA/HDD1/nextcloud
+        target: /var/www/html/data
+    environment:
+      POSTGRES_HOST: db-nextcloud
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: casaos
+      POSTGRES_PASSWORD: CHANGE_ME
+      REDIS_HOST: redis-nextcloud
+      NEXTCLOUD_ADMIN_USER: casaos
+      NEXTCLOUD_ADMIN_PASSWORD: CHANGE_ME
+      # only read on the first start; put your Pi's IP instead of 192.168.1.50
+      NEXTCLOUD_TRUSTED_DOMAINS: raspberrypi.local raspberrypi 192.168.1.50
+      TRUSTED_PROXIES: ""
+      OVERWRITEPROTOCOL: http
+      PHP_MEMORY_LIMIT: 1024M
+      PHP_UPLOAD_LIMIT: 1024M
+    depends_on:
+      db-nextcloud:
+        condition: service_healthy
+      redis-nextcloud:
+        condition: service_healthy
+    networks:
+      - nextcloud_network
+
+  db-nextcloud:
+    container_name: db-nextcloud
+    image: postgres:14.2@sha256:2c954f8c5d03da58f8b82645b783b56c1135df17e650b186b296fa1bb71f9cfd
+    restart: unless-stopped
+    volumes:
+      - /DATA/AppData/big-bear-nextcloud/pgdata:/var/lib/postgresql/data
+    environment:
+      POSTGRES_DB: nextcloud
+      POSTGRES_USER: casaos
+      POSTGRES_PASSWORD: CHANGE_ME
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U casaos -d nextcloud"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nextcloud_network
+
+  redis-nextcloud:
+    container_name: redis-nextcloud
+    image: redis:6.2.20@sha256:d06ff6ec778c7f2a5c0dfaf58141d598efaa50a89d0e966faedfdf122cef451b
+    user: "1000:1000"
+    restart: unless-stopped
+    volumes:
+      - /DATA/AppData/big-bear-nextcloud/redis:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - nextcloud_network
+
+  # Nextcloud's background jobs (every 5 minutes), same image and folders as the web container
+  cron:
+    image: bigbeartechworld/big-bear-nextcloud-with-smbclient:35.0.2@sha256:8fe245e137a6ae96a58b9ad4c5f782efa01197c36b892af1a8a9a6a206369475
+    restart: unless-stopped
+    entrypoint: /cron.sh
+    volumes:
+      - /DATA/AppData/big-bear-nextcloud/html:/var/www/html
+      - type: bind
+        source: /DATA/HDD1/nextcloud
+        target: /var/www/html/data
+    depends_on:
+      db-nextcloud:
+        condition: service_healthy
+      redis-nextcloud:
+        condition: service_healthy
+    networks:
+      - nextcloud_network
+
+networks:
+  nextcloud_network:
+    driver: bridge
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: nextcloud
+  author: BigBearTechWorld
+  developer: nextcloud
+  category: Media
+  icon: https://cdn.jsdelivr.net/gh/selfhst/icons/png/nextcloud.png
+  title:
+    en_US: Nextcloud
+  tagline:
+    en_US: The productivity platform that keeps you in control
+  port_map: "7580"
+  scheme: http
+  index: /

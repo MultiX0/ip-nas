@@ -1,0 +1,77 @@
+# Immich, photo and video backup from your phone. Web page and the mobile apps on port 2283.
+# This is Immich's own docker-compose.yml from release v3.3.5 (with the values of its example.env written in, because
+# CasaOS can't read an .env file), the photos on HDD1 (/DATA/HDD1/immich, see pi/README.md) and the database and the
+# model cache on the SD card. Replace both CHANGE_ME with the same password, letters and digits only.
+# The name is immich-photos, not immich: CasaOS ties an app to the store app with the same name, and the store's
+# "immich" is an older Immich (v2.7.2) that it would offer as an update. To update, change the two v3.3.5 tags
+# (read Immich's release notes first).
+name: immich-photos
+services:
+  immich-server:
+    container_name: immich_server
+    image: ghcr.io/immich-app/immich-server:v3.3.5
+    volumes:
+      # long form on purpose: without the drive the folder is missing and the app doesn't start
+      - type: bind
+        source: /DATA/HDD1/immich
+        target: /data
+      - /etc/localtime:/etc/localtime:ro
+    environment:
+      DB_PASSWORD: CHANGE_ME
+      DB_USERNAME: postgres
+      DB_DATABASE_NAME: immich
+    ports:
+      - "2283:2283"
+    depends_on:
+      - redis
+      - database
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+
+  # face recognition and smart search; the hungry one on a 4 GB Pi (pi/README.md, Immich)
+  immich-machine-learning:
+    container_name: immich_machine_learning
+    image: ghcr.io/immich-app/immich-machine-learning:v3.3.5
+    volumes:
+      - /DATA/AppData/immich/model-cache:/cache
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+
+  redis:
+    container_name: immich_redis
+    image: docker.io/valkey/valkey:9@sha256:c123e3715db63d06d4ad6964884037aa0d5d4d703939b9929954112889708e1d
+    healthcheck:
+      test: redis-cli ping | grep -q PONG || exit 1
+    restart: unless-stopped
+
+  database:
+    container_name: immich_postgres
+    image: ghcr.io/immich-app/postgres:14-vectorchord0.4.3-pgvectors0.2.0@sha256:bcf63357191b76a916ae5eb93464d65c07511da41e3bf7a8416db519b40b1c23
+    environment:
+      POSTGRES_PASSWORD: CHANGE_ME
+      POSTGRES_USER: postgres
+      POSTGRES_DB: immich
+      POSTGRES_INITDB_ARGS: "--data-checksums"
+    volumes:
+      - /DATA/AppData/immich/pgdata:/var/lib/postgresql/data
+    shm_size: 128mb
+    restart: unless-stopped
+    healthcheck:
+      disable: false
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: immich-server
+  category: Media
+  icon: https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Immich/icon.svg
+  title:
+    en_US: Immich
+  tagline:
+    en_US: Photo and video backup from your phone
+  port_map: "2283"
+  scheme: http
+  index: /

@@ -1,0 +1,21 @@
+[Unit]
+Description=IP NAS touch panel agent (USB link to the ESP32-S3 screen)
+Documentation=file:///opt/ipnas-panel/README.md
+After=network-online.target docker.service NetworkManager.service
+Wants=network-online.target
+# never give up: by default systemd stops restarting a unit after 5 quick failures in 10 s
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+# root: the agent drives docker (start/stop/pause/remove) and nmcli (Wi-Fi switch) for the panel
+User=root
+WorkingDirectory=/opt/ipnas-panel
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/usr/bin/python3 -u /opt/ipnas-panel/ipnas_panel_agent.py
+Restart=always
+RestartSec=3
+TimeoutStopSec=5
+
+[Install]
+WantedBy=multi-user.target

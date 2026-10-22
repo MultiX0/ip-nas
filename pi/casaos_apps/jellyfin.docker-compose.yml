@@ -1,0 +1,55 @@
+# Jellyfin as the CasaOS App Store installs it (BigBear's "Jellyfin", the linuxserver.io image), web page on port 8096.
+# The only change from the store app: the movies and shows folders are on HDD1 (/DATA/HDD1/media, see pi/README.md)
+# instead of /DATA/AppData/jellyfin/data on the SD card. In Jellyfin, add them as /data/movies and /data/tvshows.
+# The Pi 5 has no hardware video encoder, so there is no /dev/dri here: Jellyfin transcodes on the CPU.
+name: big-bear-linuxserver-jellyfin
+services:
+  app:
+    image: linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95
+    restart: unless-stopped
+    environment:
+      # CasaOS fills these in (1000, 1000 and the Pi's time zone); the values after :- are for plain docker compose
+      PUID: ${PUID:-1000}
+      PGID: ${PGID:-1000}
+      TZ: ${TZ:-Etc/UTC}
+      JELLYFIN_PublishedServerUrl: ""
+    ports:
+      - target: 8096
+        published: "8096"
+        protocol: tcp
+      - target: 8920
+        published: "8920"
+        protocol: tcp
+      # client discovery and DLNA
+      - target: 7359
+        published: "7359"
+        protocol: udp
+      - target: 1900
+        published: "1900"
+        protocol: udp
+    volumes:
+      - /DATA/AppData/jellyfin/config:/config
+      # long form on purpose: without the drive the folders are missing and the app doesn't start
+      - type: bind
+        source: /DATA/HDD1/media/tvshows
+        target: /data/tvshows
+      - type: bind
+        source: /DATA/HDD1/media/movies
+        target: /data/movies
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: app
+  author: WisdomSky
+  developer: LinuxServer.io
+  category: Media
+  icon: https://cdn.jsdelivr.net/gh/linuxserver/docker-templates@master/linuxserver.io/img/jellyfin-logo.png
+  title:
+    en_US: Jellyfin
+  tagline:
+    en_US: Your movies and shows, streamed from the NAS
+  port_map: "8096"
+  scheme: http
+  index: /

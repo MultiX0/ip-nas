@@ -1,0 +1,56 @@
+# Build output and tool caches
+/build/
+/coverage/
+.dart_tool/
+.pub-cache/
+.pub/
+.flutter-plugins
+.flutter-plugins-dependencies
+**/doc/api/
+migrate_working_dir/
+app.*.symbols
+app.*.map.json
+
+# Written again by `flutter pub get` / `flutter build`
+windows/flutter/ephemeral/
+windows/flutter/generated_plugin_registrant.*
+windows/flutter/generated_plugins.cmake
+android/app/src/main/java/io/flutter/plugins/GeneratedPluginRegistrant.java
+ios/Runner/GeneratedPluginRegistrant.*
+ios/Flutter/ephemeral/
+ios/Flutter/Generated.xcconfig
+ios/Flutter/flutter_export_environment.sh
+ios/Flutter/.last_build_id
+ios/Pods/
+.swiftpm/
+.build/
+
+# Local machine files (SDK paths)
+android/local.properties
+android/.gradle/
+android/.kotlin/
+android/app/.cxx/
+android/app/debug
+android/app/profile
+android/app/release
+
+# Signing keys and service files
+android/key.properties
+*.jks
+*.keystore
+google-services.json
+GoogleService-Info.plist
+.env
+.env.*
+
+# Editors and OS
+.idea/
+*.iml
+*.ipr
+*.iws
+.vscode/
+.history
+*.swp
+.DS_Store
+Thumbs.db
+*.log
