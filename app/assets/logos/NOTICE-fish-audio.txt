@@ -1,0 +1,17 @@
+Fish Audio logos
+
+The Fish Audio logo files in this folder are Fish Audio's official brand assets. They belong to Fish Audio,
+come from the logo package linked on https://docs.fish.audio/developer-guide/resources/brand, and are not
+part of Lobe Icons (LICENSE-lobe-icons.txt does not cover them).
+
+fishaudio-lockup-white.svg  FishAudio-Horizontal-White.svg, unchanged
+fishaudio-lockup-black.svg  FishAudio-Horizontal-Black.svg, unchanged
+fishaudio-icon-white.svg    FishAudio-Horizontal-White.svg cropped to the icon
+fishaudio-icon-black.svg    FishAudio-Horizontal-Black.svg cropped to the icon
+
+The icon files only set the root <svg> width, height and viewBox to 118 x 44, the icon's own area. The artwork is
+not changed; everything outside that area is cut off.
+
+Fish Audio's rules: do not distort, rotate, recolour or add effects to the logo. Use the white file on dark
+backgrounds and the black file on light ones; prefer the lockup (icon and wordmark) and use the icon alone only
+where space is too tight.

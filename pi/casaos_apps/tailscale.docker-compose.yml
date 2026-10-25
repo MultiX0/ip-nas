@@ -1,0 +1,37 @@
+# Tailscale as the CasaOS App Store installs it (the CasaOS "Tailscale", not BigBear's). It runs on the host network,
+# so the Pi itself joins your tailnet and every app on it can be reached at the Pi's Tailscale address (100.x.y.z).
+# Log in once at http://raspberrypi.local:5252. No ports to open on the router.
+name: tailscale
+services:
+  tailscale:
+    image: tailscale/tailscale:v1.98.3
+    container_name: tailscale
+    network_mode: host
+    restart: unless-stopped
+    volumes:
+      - /DATA/AppData/tailscale:/var/lib/tailscale
+      - /dev/net/tun:/dev/net/tun
+    environment:
+      TS_STATE_DIR: /var/lib/tailscale
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+    # tailscaled in the background, then Tailscale's own web page on port 5252 (log in, see the address, log out)
+    entrypoint: /bin/sh -c "tailscaled --state=/var/lib/tailscale/tailscaled.state & sleep 10; tailscale web --listen 0.0.0.0:5252"
+
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: tailscale
+  author: ZimaOS Team
+  developer: Tailscale Inc.
+  category: Networking
+  icon: https://cdn.jsdelivr.net/gh/IceWhaleTech/CasaOS-AppStore@main/Apps/Tailscale/icon.svg
+  title:
+    en_US: Tailscale
+  tagline:
+    en_US: Connect your devices and users together in your own secure virtual private network.
+  port_map: "5252"
+  scheme: http
+  index: /

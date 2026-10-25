@@ -1,0 +1,52 @@
+# Nur Hub. CasaOS: + next to Apps, Install a customized app, Import, paste this file. Plain Docker: docker compose up -d
+# Image: multix00/nur-hub on Docker Hub (linux/amd64 and linux/arm64), built from the Dockerfile in this folder.
+name: nur-hub
+services:
+  nur-hub:
+    image: multix00/nur-hub:latest
+    container_name: nur-hub
+    restart: unless-stopped
+    # Nur Hub manages the NAS itself (status, Docker apps, commands, model downloads), so it needs the host's view:
+    network_mode: host   # mDNS discovery + reach llama.cpp and SearXNG on 127.0.0.1
+    pid: host            # nsenter into the host to run docker / vcgencmd / nmcli / smartctl
+    privileged: true     # required by nsenter
+    environment:
+      NUR_HUB_PORT: "8770"
+      NUR_HUB_ALLOW_ADMIN: "1"          # "0" = only the read-only command list, even for paired devices
+      NUR_HUB_MODELS_DIR: /DATA/AppData/llamacpp/models
+      NUR_HUB_LLAMA_URL: http://127.0.0.1:8088
+      NUR_HUB_SEARX_URL: http://127.0.0.1:8888
+    volumes:
+      - type: bind
+        source: /DATA/AppData/nur-hub
+        target: /var/lib/nur-hub       # paired devices (hashed tokens)
+      - type: bind
+        source: /DATA
+        target: /DATA                  # model downloads land in the folder llama.cpp uses
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: nur-hub
+  author: Nur
+  category: Utilities
+  developer: Nur
+  icon: https://raw.githubusercontent.com/MultiX0/ip-nas/main/app/assets/brand/icon_rounded_1024.png
+  tagline:
+    en_us: Connect the Nur AI app to your NAS
+  description:
+    en_us: >-
+      Nur Hub lets the Nur app (Android, iOS, Windows) find and pair with this NAS, show its status, start and stop
+      Docker apps, search the web through your own SearXNG, download local AI models, and chat with the
+      llama.cpp models running here. Open the Nur app on the same Wi-Fi and tap your NAS. The first device becomes the owner.
+  title:
+    en_us: Nur Hub
+  port_map: "8770"
+  scheme: http
+  index: /api/v1/info
+  tips:
+    before_install:
+      en_us: >-
+        Nur Hub needs host access (host network, host PID, privileged) because it manages the NAS: it reads system
+        status, controls Docker containers and runs system commands. Only paired devices can use it. Set
+        NUR_HUB_ALLOW_ADMIN to 0 to allow only the read-only command list.

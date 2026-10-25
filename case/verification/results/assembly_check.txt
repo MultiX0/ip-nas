@@ -1,0 +1,9 @@
+CLASH CHECK
+CLASH TOTAL 0
+SWEEP CHECK (part slid out along its assembly path; inset 0.15 mm)
+  SWEEP screen  (slides down from the top): free path
+  SWEEP drive 1 + head (drops in from the top): free path
+  SWEEP drive 2 + head (drops in from the top): free path
+  SWEEP hub (drops onto its ledges): free path
+  SWEEP Pi + door + plugged USB/Ethernet (closes from the back): free path
+SWEEP TOTAL 0 blocked

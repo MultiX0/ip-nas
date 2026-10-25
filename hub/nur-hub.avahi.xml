@@ -1,0 +1,10 @@
+<?xml version="1.0" standalone='no'?>
+<!DOCTYPE service-group SYSTEM "avahi-service.dtd">
+<service-group>
+  <name replace-wildcards="yes">Nur Hub on %h</name>
+  <service>
+    <type>_nurhub._tcp</type>
+    <port>8770</port>
+    <txt-record>version=1</txt-record>
+  </service>
+</service-group>

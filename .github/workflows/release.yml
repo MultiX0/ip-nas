@@ -1,0 +1,123 @@
+# Builds the screen firmware and the Nur app for Android, Windows and Linux.
+# A tag like v1.0.0 also attaches the four files to that release; a manual run only keeps them as artifacts.
+name: Release builds
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  FLUTTER_VERSION: '3.44.1'
+
+jobs:
+  firmware:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - run: pip install platformio
+      - name: Build
+        working-directory: panel/firmware
+        run: pio run
+      - name: Merge into one image for 0x0
+        working-directory: panel/firmware
+        run: |
+          B=.pio/build/ipnas_panel
+          pio pkg exec -p tool-esptoolpy -- esptool.py --chip esp32s3 merge_bin -o ipnas-panel-1.1.0.bin \
+            --flash_mode keep --flash_freq keep --flash_size keep \
+            0x0 $B/bootloader.bin 0x8000 $B/partitions.bin \
+            0xe000 $HOME/.platformio/packages/framework-arduinoespressif32/tools/partitions/boot_app0.bin \
+            0x10000 $B/firmware.bin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: firmware
+          path: panel/firmware/ipnas-panel-1.1.0.bin
+
+  android:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Build
+        working-directory: app
+        run: flutter build apk --release
+      - run: cp app/build/app/outputs/flutter-apk/app-release.apk nur-android.apk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android
+          path: nur-android.apk
+
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Build
+        working-directory: app
+        run: flutter build windows --release
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path app/build/windows/x64/runner/Release/* -DestinationPath nur-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: nur-windows-x64.zip
+
+  linux:
+    # 22.04 so the bundle also runs on Ubuntu 22.04 and Debian 12 (older glibc)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build tools and libraries
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang cmake ninja-build pkg-config libgtk-3-dev liblzma-dev libstdc++-12-dev \
+            libsecret-1-dev libjsoncpp-dev libasound2-dev libpulse-dev
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: ${{ env.FLUTTER_VERSION }}
+          channel: stable
+          cache: true
+      - name: Build
+        working-directory: app
+        run: flutter build linux --release
+      - name: Pack
+        run: tar -C app/build/linux/x64/release/bundle -czf nur-linux-x64.tar.gz .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux
+          path: nur-linux-x64.tar.gz
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/')
+    needs: [firmware, android, windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ipnas-panel-1.1.0.bin
+            nur-android.apk
+            nur-windows-x64.zip
+            nur-linux-x64.tar.gz

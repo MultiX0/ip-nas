@@ -1,0 +1,154 @@
+Snapshot of my NAS Pi on 2026-10-22, the setup from the video: a fresh Raspberry Pi OS Lite (trixie), CasaOS 0.4.15,
+Nur Hub, SearXNG, Nextcloud and Jellyfin from CasaOS, and the screen's Pi agent. Taken over SSH with read-only commands;
+each header is the command. IP addresses, Wi-Fi names, user names, serial numbers, UUIDs and passwords are left out.
+
+On this day the drives were still mounted by CasaOS's devmon under /media/devmon and the apps still kept everything on
+the SD card. pi/README.md mounts the drives at /DATA/HDD1 and /DATA/HDD2 and puts the app data there.
+
+### grep -E '^(PRETTY_NAME|DEBIAN_VERSION_FULL)=' /etc/os-release; uname -r; cat /proc/device-tree/model; free -h
+PRETTY_NAME="Debian GNU/Linux 13 (trixie)"
+DEBIAN_VERSION_FULL=13.7
+6.18.50+rpt-rpi-2712
+Raspberry Pi 5 Model B Rev 1.0
+RAM 4.0Gi
+
+### grep -vE '^\s*#|^\s*$' /boot/firmware/config.txt   (not changed, as the image wrote it)
+dtparam=audio=on
+camera_auto_detect=1
+display_auto_detect=1
+auto_initramfs=1
+dtoverlay=vc4-kms-v3d
+max_framebuffers=2
+disable_fw_kms_setup=1
+arm_64bit=1
+disable_overscan=1
+arm_boost=1
+[cm4]
+otg_mode=1
+[cm5]
+dtoverlay=dwc2,dr_mode=host
+[pi5]
+dtoverlay=nospi10
+[all]
+
+### vcgencmd get_config usb_max_current_enable; od -An -tu4 --endian=big /proc/device-tree/chosen/power/max_current; vcgencmd get_throttled
+usb_max_current_enable=1
+max_current=5000 mA        (the official 27 W supply, so the USB ports get 1.6 A in total)
+throttled=0x0
+
+### lsblk -i -o NAME,SIZE,FSTYPE,LABEL,MODEL,MOUNTPOINTS
+NAME          SIZE FSTYPE LABEL           MODEL                  MOUNTPOINTS
+loop0           2G swap   origin:rpi-swap
+sda         298.1G                        WDC WD3200LPVX-16V0TT3
+`-sda1      298.1G ext4   HDD1                                   /media/devmon/HDD1
+sdb         149.1G                        WDC WD1600BEVT
+`-sdb1        149G ext4   HDD2                                   /media/devmon/HDD2
+mmcblk0     116.5G
+|-mmcblk0p1   512M vfat   bootfs                                 /boot/firmware
+`-mmcblk0p2   116G ext4   rootfs                                 /
+zram0           2G swap   zram0                                  [SWAP]
+
+### lsusb -t | grep -i 'mass storage'; lsusb | grep -i sata
+    |__ Port 001: Dev 002, If 0, Class=Mass Storage, Driver=uas, 5000M
+    |__ Port 001: Dev 002, If 0, Class=Mass Storage, Driver=uas, 5000M
+ID 174c:1153 ASMedia Technology Inc. ASM1153 SATA 3Gb/s bridge
+ID 174c:1153 ASMedia Technology Inc. ASM1153 SATA 3Gb/s bridge
+
+### cat /etc/fstab   (nothing added yet; PARTUUIDs shortened)
+proc            /proc           proc    defaults          0       0
+PARTUUID=xxxxxxxx-01  /boot/firmware  vfat    defaults          0       2
+PARTUUID=xxxxxxxx-02  /               ext4    defaults,noatime  0       1
+
+### findmnt -rn -o SOURCE,TARGET,FSTYPE,OPTIONS -S LABEL=HDD1 (and HDD2)
+/dev/sda1 /media/devmon/HDD1 ext4 rw,nosuid,nodev,noatime
+/dev/sdb1 /media/devmon/HDD2 ext4 rw,nosuid,nodev,noatime,stripe=8191
+
+### cat /etc/conf.d/devmon   (CasaOS's automounter, from the udevil package)
+ARGS="--mount-options nosuid,nodev,noatime --ignore-label EFI"
+
+### CasaOS version (/var/lib/casaos/baseinfo.conf) and app sources (grep ^appstore /etc/casaos/app-management.conf)
+CasaOS v0.4.15
+appstore = https://casaos.app/store/main.zip
+appstore = https://github.com/bigbeartechworld/big-bear-casaos/archive/refs/heads/master.zip
+
+### dpkg-query -W (the packages that matter here; CasaOS's installer added smartmontools, udevil, samba, mergerfs
+### and Docker (and rclone, not as a package), the screen's install.sh added python3-serial and python3-psutil,
+### the rest came with the OS image)
+docker-ce 5:29.9.1-1~debian.13~trixie
+docker-compose-plugin 5.6.0-1~debian.13~trixie
+udevil 0.4.4-4
+samba 2:4.22.11+dfsg-0+deb13u1
+mergerfs 2.40.2-5
+smartmontools 7.4-3
+parted 3.6-5
+avahi-daemon 0.8-16
+network-manager 1.52.1-1+rpt4
+openssh-server 1:10.0p1-7+deb13u4
+python3-serial 3.5-2
+python3-psutil 7.0.0-2
+
+### systemctl list-unit-files --state=enabled   (the ones that matter here)
+avahi-daemon casaos casaos-app-management casaos-gateway casaos-local-storage casaos-message-bus casaos-user-service
+containerd devmon@devmon docker ipnas-panel NetworkManager nmbd rclone smartmontools smbd ssh
+
+### ss -tulnH   (ports open to the network)
+tcp 22 (SSH), 80 (CasaOS), 139 and 445 (Samba), 7580 (Nextcloud), 8096 and 8920 (Jellyfin), 8770 (Nur Hub),
+    8888 (SearXNG)
+udp 137 and 138 (Samba), 1900 and 7359 (Jellyfin), 5353 (mDNS, avahi)
+
+### CasaOS apps (GET /v2/app_management/compose on the Pi itself; secrets left out)
+
+big-bear-linuxserver-jellyfin  (installed from the App Store, CasaOS opens port 8096)
+  app: linuxserver/jellyfin:12.1ubu2604-ls50@sha256:51252e7a416e703cdc3cd91e8a54673a2430cc80409be8a38abe511411577b95
+    restart: unless-stopped
+    port 8096:8096/tcp, 8920:8920/tcp, 7359:7359/udp, 1900:1900/udp
+    volume /DATA/AppData/jellyfin/config:/config
+    volume /DATA/AppData/jellyfin/data/tvshows:/data/tvshows
+    volume /DATA/AppData/jellyfin/data/movies:/data/movies
+    env JELLYFIN_PublishedServerUrl= PGID=1000 PUID=1000 TZ=Europe/London
+
+big-bear-nextcloud  (installed from the App Store, CasaOS opens port 7580)
+  nextcloud: bigbeartechworld/big-bear-nextcloud-with-smbclient:35.0.2@sha256:8fe245e137a6ae96a58b9ad4c5f782efa01197c36b892af1a8a9a6a206369475
+    restart: unless-stopped
+    port 7580:80/tcp
+    volume /DATA/AppData/big-bear-nextcloud/html:/var/www/html
+    env NEXTCLOUD_ADMIN_PASSWORD=<set> NEXTCLOUD_ADMIN_USER=casaos OVERWRITEPROTOCOL=http PHP_MEMORY_LIMIT=1024M
+        PHP_UPLOAD_LIMIT=1024M POSTGRES_DB=nextcloud POSTGRES_HOST=db-nextcloud POSTGRES_PASSWORD=<set>
+        POSTGRES_USER=casaos REDIS_HOST=redis-nextcloud TRUSTED_PROXIES=
+  db-nextcloud: postgres:14.2@sha256:2c954f8c5d03da58f8b82645b783b56c1135df17e650b186b296fa1bb71f9cfd
+    restart: unless-stopped
+    volume /DATA/AppData/big-bear-nextcloud/pgdata:/var/lib/postgresql/data
+    env POSTGRES_DB=nextcloud POSTGRES_PASSWORD=<set> POSTGRES_USER=casaos
+  redis-nextcloud: redis:6.2.20@sha256:d06ff6ec778c7f2a5c0dfaf58141d598efaa50a89d0e966faedfdf122cef451b
+    restart: unless-stopped, user 1000:1000
+    volume /DATA/AppData/big-bear-nextcloud/redis:/data
+  cron: bigbeartechworld/big-bear-nextcloud-with-smbclient:35.0.2@sha256:8fe245e137a6ae96a58b9ad4c5f782efa01197c36b892af1a8a9a6a206369475
+    restart: unless-stopped, entrypoint /cron.sh
+    volume /DATA/AppData/big-bear-nextcloud/html:/var/www/html
+
+nur-hub  (custom install of hub/docker-compose.yml, CasaOS opens port 8770)
+  nur-hub: multix00/nur-hub:latest
+    restart: unless-stopped, network: host, privileged, pid: host
+    volume /DATA/AppData/nur-hub:/var/lib/nur-hub
+    volume /DATA:/DATA
+    env NUR_HUB_ALLOW_ADMIN=1 NUR_HUB_LLAMA_URL=http://127.0.0.1:8088 NUR_HUB_MODELS_DIR=/DATA/AppData/llamacpp/models
+        NUR_HUB_PORT=8770
+        NUR_HUB_SEARX_URL=http://127.0.0.1:8888
+
+searxng  (custom install, CasaOS opens port 8888)
+  searxng: searxng/searxng:latest
+    restart: unless-stopped, network: bridge
+    port 8888:8080/tcp
+    volume /DATA/AppData/searxng:/etc/searxng
+  settings.yml was still the one the image writes on its first start (use_default_settings, secret_key,
+  image_proxy), without json in search.formats, so /search?format=json answered 403
+
+### free -m, and resident memory per container (VmRSS of the processes in each docker-*.scope)
+               total        used        free      shared  buff/cache   available
+Mem:            4049         990        1885          99        1343        3058
+Nur Hub 38 MB, SearXNG 176 MB, Jellyfin 295 MB (idle), Nextcloud 285 MB (web 203, PostgreSQL 73, Redis 8, cron 1)
+The kernel runs with cgroup_disable=memory (Raspberry Pi OS default), so memory limits in compose files do nothing.
+
+### systemctl is-active ipnas-panel; grep ExecStart /etc/systemd/system/ipnas-panel.service
+active
+ExecStart=/usr/bin/python3 -u /opt/ipnas-panel/ipnas_panel_agent.py

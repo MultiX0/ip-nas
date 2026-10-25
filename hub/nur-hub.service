@@ -1,0 +1,19 @@
+[Unit]
+Description=Nur Hub (local API for the Nur app)
+Wants=network-online.target
+After=network-online.target docker.service
+
+[Service]
+Type=simple
+User=root
+ExecStart=/usr/bin/python3 /opt/nur-hub/nur_hub.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+# Settings go here, for example NUR_HUB_ALLOW_ADMIN=0 (see README.md)
+EnvironmentFile=-/etc/default/nur-hub
+StateDirectory=nur-hub
+StateDirectoryMode=0700
+
+[Install]
+WantedBy=multi-user.target
